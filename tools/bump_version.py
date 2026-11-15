@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """升级版本号并在 CHANGELOG.md 顶部加一节。用法：python tools/bump_version.py [patch|minor|major]
 
-每个小版本（末位 +1）都会进入软件内更新通道；末位是 10 的倍数（x.y.0、x.y.10、x.y.20…）
-的版本同时发布带安装包的正式 Release。
+版本规则：x.y.0 是大版本（发布带安装包的正式 Release），之后的小版本 x.y.1 … x.y.10
+只进入软件内更新通道；x.y.10 之后的下一个版本自动进位为大版本 x.(y+1).0。
+例：0.1.0 → 0.1.1 → … → 0.1.10 → 0.2.0。
 """
 from __future__ import annotations
 
@@ -19,6 +20,8 @@ def bump(version: str, part: str) -> str:
     major, minor, patch = (int(x) for x in version.split("."))
     if part == "patch":
         patch += 1
+        if patch > 10:
+            minor, patch = minor + 1, 0
     elif part == "minor":
         minor, patch = minor + 1, 0
     elif part == "major":
@@ -38,7 +41,7 @@ def main() -> None:
     head = f"## v{new}\n\n- \n\n"
     idx = log.index("## v")
     CHANGELOG.write_text(log[:idx] + head + log[idx:], encoding="utf-8")
-    kind = "第 10 个小版本：会同时发布带安装包的正式 Release" if int(new.split(".")[-1]) % 10 == 0 else "小版本：只进入软件内更新通道"
+    kind = "大版本：会同时发布带安装包的正式 Release" if new.endswith(".0") else "小版本：只进入软件内更新通道"
     print(f"{old} -> {new}（{kind}）。请补全 CHANGELOG.md 中的条目。")
 
 

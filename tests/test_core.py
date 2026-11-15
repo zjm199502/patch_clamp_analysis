@@ -106,6 +106,11 @@ def test_group_stats_and_export(tmp_path):
     assert hb["p_two_sided"] < 0.05
     lm = stats.event_level_lmm(proj.events_table(), "amplitude")
     assert lm["p"] < 0.01 and 1.3 < list(lm["fold_change"].values())[0] < 2.0
+    from patchclamp_gui.core import plots
+    for mode in ("cell_average", "pooled_equal", "pooled_all"):
+        fig, txt = plots.cumulative_figure(proj, mode=mode)
+        assert len(fig.axes) == 2 and "p =" in txt
+    fig.savefig(tmp_path / "cdf.pdf")
     files = proj.export(str(tmp_path / "out"))
     assert all((tmp_path / f.split("/")[-1]).exists() for f in files)
 

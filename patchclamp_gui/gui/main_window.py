@@ -42,6 +42,26 @@ def _spin(val, lo, hi, step=1.0, dec=2, suffix=""):
     return s
 
 
+class ZoomCanvas(FigureCanvasQTAgg):
+    """按比例缩放显示的图：窗口变小时整体缩小（像看 PDF），而不是把子图挤在一起造成文字重叠。
+    导出时仍使用原始尺寸（英寸）与排版。"""
+
+    MIN_DPI = 55
+
+    def __init__(self, fig):
+        self._inches = fig.get_size_inches().copy()
+        super().__init__(fig)
+        self.setMinimumSize(int(self._inches[0] * self.MIN_DPI), int(self._inches[1] * self.MIN_DPI))
+
+    def resizeEvent(self, event):
+        w, h = event.size().width(), event.size().height()
+        if w > 10 and h > 10:
+            dpi = max(min(w / self._inches[0], h / self._inches[1]), self.MIN_DPI)
+            self.figure._original_dpi = dpi
+            self.figure.dpi = dpi * self.device_pixel_ratio
+        super().resizeEvent(event)
+
+
 class FigurePanel(QtWidgets.QWidget):
     """matplotlib 图 + 文字结果 + 导出按钮。"""
 
@@ -53,8 +73,13 @@ class FigurePanel(QtWidgets.QWidget):
         self.split = QtWidgets.QSplitter(Qt.Vertical)
         self.holder = QtWidgets.QWidget(); self.hl = QtWidgets.QVBoxLayout(self.holder)
         self.hl.setContentsMargins(0, 0, 0, 0)
+        self.scroll = QtWidgets.QScrollArea(); self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QtWidgets.QFrame.NoFrame); self.scroll.setWidget(self.holder)
         self.text = QtWidgets.QPlainTextEdit(); self.text.setReadOnly(True)
-        self.split.addWidget(self.holder); self.split.addWidget(self.text)
+        mono = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)   # 表格类结果按列对齐
+        mono.setPointSize(QtWidgets.QApplication.font().pointSize())
+        self.text.setFont(mono)
+        self.split.addWidget(self.scroll); self.split.addWidget(self.text)
         self.split.setStretchFactor(0, 3); self.split.setStretchFactor(1, 1)
         lay.addWidget(self.split)
         row = QtWidgets.QHBoxLayout()
@@ -68,8 +93,7 @@ class FigurePanel(QtWidgets.QWidget):
         if self.canvas is not None:
             self.hl.removeWidget(self.canvas); self.canvas.setParent(None); self.canvas.deleteLater()
         self.fig = fig
-        self.canvas = FigureCanvasQTAgg(fig)
-        self.canvas.setMinimumHeight(260)
+        self.canvas = ZoomCanvas(fig)
         self.hl.addWidget(self.canvas)
         if self.split.sizes()[0] < 300:
             self.split.setSizes([640, 240])
@@ -82,7 +106,13 @@ class FigurePanel(QtWidgets.QWidget):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "导出图", "figure.pdf", "PDF (*.pdf);;SVG (*.svg);;PNG 600 dpi (*.png);;TIFF 600 dpi (*.tiff)")
         if path:
+            dpi, orig = self.fig.dpi, getattr(self.fig, "_original_dpi", self.fig.dpi)
+            size = self.fig.get_size_inches().copy()
+            self.fig.set_size_inches(self.canvas._inches, forward=False)
             self.fig.savefig(path, dpi=600)
+            self.fig.set_size_inches(size, forward=False)
+            self.fig._original_dpi, self.fig.dpi = orig, dpi
+            self.canvas.draw_idle()
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -130,11 +160,13 @@ class MainWindow(QtWidgets.QMainWindow):
         for label, fn in (("添加文件", self.open_files), ("移除", self.remove_cell)):
             b = QtWidgets.QPushButton(label); b.clicked.connect(fn); row.addWidget(b)
         v.addLayout(row)
-        dock.setWidget(w); dock.setMinimumWidth(450)
-        for j, wd in enumerate((0, 80, 55, 55, 65)):
-            if j:
-                self.cell_table.setColumnWidth(j, wd)
+        dock.setWidget(w); dock.setMinimumWidth(300)
+        hh = self.cell_table.horizontalHeader()
+        for j in range(1, 5):
+            hh.setSectionResizeMode(j, QtWidgets.QHeaderView.ResizeToContents)
+        self.cell_table.verticalHeader().setVisible(False)
         self.addDockWidget(Qt.LeftDockWidgetArea, dock)
+        self.resizeDocks([dock], [430], Qt.Horizontal)
 
         self.tabs = QtWidgets.QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -149,6 +181,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _tab_detect(self):
         w = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(w)
         form_w = QtWidgets.QWidget(); form = QtWidgets.QFormLayout(form_w)
+        form.setRowWrapPolicy(QtWidgets.QFormLayout.WrapLongRows)
         self.p = {}
         self.preset = QtWidgets.QComboBox(); self.preset.addItems(list(detection.PRESETS))
         self.preset.currentTextChanged.connect(self.apply_preset)
@@ -286,7 +319,7 @@ class MainWindow(QtWidgets.QMainWindow):
     ANALYSES = ["细胞总览", "检测质控（注入 / 反极性 / 阈值扫描）", "上升时间–幅度相关（树突滤波诊断）",
                 "事件时间依赖性（自相关 / Hawkes）", "峰值缩放非平稳噪声分析（PS-NSFA）", "量子多峰分析",
                 "E/I 联合分析（当前细胞=E，另选一个=I）",
-                "组间比较（层级统计）", "突触缩放（秩序图 / 比例图）", "各簇组成的组间比较"]
+                "组间比较（层级统计）", "累积概率分布（幅度 / IEI）", "突触缩放（秩序图 / 比例图）", "各簇组成的组间比较"]
 
     def _tab_analysis(self):
         w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
@@ -297,11 +330,36 @@ class MainWindow(QtWidgets.QMainWindow):
                                 + ["iei_cv", "avg_event_tau", "noise_rms"])
         self.an_metric.setCurrentText("amplitude_median")
         self.an_other = QtWidgets.QComboBox()
+        self.an_other.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.an_other.setMinimumContentsLength(16)
         self.an_df = _spin(70, 1, 200, 5, 0, "mV")
+        self.an_cdf = QtWidgets.QComboBox()
+        self.an_cdf.addItems(["按细胞平均", "等量抽取后合并", "全部事件合并"])
+        self.an_cdf.setItemData(0, "推荐：每个细胞权重相同", Qt.ToolTipRole)
+        # 下拉框按“最短可读长度”定宽，长选项在展开的列表里完整显示（避免把窗口撑宽）
+        for cb, n in ((self.an, 22), (self.an_metric, 14), (self.an_cdf, 8)):
+            cb.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            cb.setMinimumContentsLength(n)
+            cb.view().setMinimumWidth(cb.view().sizeHintForColumn(0) + 30)
+            cb.setToolTip("当前：" + cb.currentText())
+            cb.currentTextChanged.connect(lambda t, c=cb: c.setToolTip("当前：" + t))
         b = QtWidgets.QPushButton("运行"); b.clicked.connect(self.run_analysis)
-        for lab, wd in (("分析", self.an), ("组间指标", self.an_metric), ("I 细胞", self.an_other), ("NSFA 驱动力", self.an_df)):
-            row.addWidget(QtWidgets.QLabel(lab)); row.addWidget(wd)
-        row.addWidget(b); row.addStretch(1)
+        # 两行排布，窄屏（1280 宽、150% 缩放）也不会把控件挤出窗口
+        grid = QtWidgets.QGridLayout(); grid.setHorizontalSpacing(8)
+        grid.addWidget(QtWidgets.QLabel("分析"), 0, 0, Qt.AlignRight)
+        cells = [[],
+                 [("组间指标", self.an_metric), ("累积分布画法", self.an_cdf)],
+                 [("I 细胞", self.an_other), ("NSFA 驱动力", self.an_df)]]
+        for r_, items in enumerate(cells):
+            for c_, (lab, wd) in enumerate(items):
+                grid.addWidget(QtWidgets.QLabel(lab), r_, 2 * c_, Qt.AlignRight)
+                grid.addWidget(wd, r_, 2 * c_ + 1)
+        grid.addWidget(self.an, 0, 1, 1, 3)
+        grid.addWidget(b, 0, 4, 1, 2)
+        grid.setColumnStretch(1, 3); grid.setColumnStretch(3, 2)
+        for cb in (self.an, self.an_metric, self.an_cdf, self.an_other, self.an_df):
+            cb.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        row.addLayout(grid)
         v.addLayout(row)
         self.an_panel = FigurePanel(); v.addWidget(self.an_panel, 1)
         return w
@@ -689,7 +747,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 dur = sum(c.rec.duration for c in cells)
                 summ = clustering.cluster_summary(dfu, res.labels, dur)
                 txt = [res.message, f"参与聚类的事件 {int(res.valid.sum())} 个（{'全部细胞合并' if pooled else cells[0].name}）", "",
-                       "各簇中位数：", summ.round(3).to_string(index=False), "",
+                       "各簇中位数：", summ.round(3).to_string(index=False, col_space=7), "",
                        "解读线索：", "· 幅度贴近噪声、衰减极短或电荷为负的一簇多半是误检的噪声，可在“事件审核”中按簇排序后排除，或提高检测阈值；",
                        "· 上升慢、衰减慢且幅度小的一簇 → 远端树突输入（电紧张滤波），可用“上升时间–幅度相关”佐证；",
                        "· 上升相近但衰减明显不同 → 受体亚基/类型不同（如 GluA2 缺失的快 AMPAR、含 NMDA 成分的慢 EPSC；α1 与 α2/3/5 型 GABA_A 受体），或不同来源的中间神经元（PV 胞体周围快 IPSC vs SST 树突慢 IPSC）；",
@@ -710,6 +768,7 @@ class MainWindow(QtWidgets.QMainWindow):
         metric = self.an_metric.currentText()
         other = next((x for x in self.project.cells if x.name == self.an_other.currentText()), None)
         dfm = self.an_df.value()
+        cdf_mode = ["cell_average", "pooled_equal", "pooled_all"][self.an_cdf.currentIndex()]
 
         def job():
             if i == 0: return plots.cell_overview(c)
@@ -725,7 +784,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if len(self.project.analyzed()) < 2:
                 return plots.new_figure(3, 2), "组间分析需要至少 2 个已检测的细胞，并在左侧列表填写组别。"
             if i == 7: return plots.group_comparison(self.project, metric)
-            if i == 8: return plots.scaling_figure(self.project)
+            if i == 8: return plots.cumulative_figure(self.project, mode=cdf_mode)
+            if i == 9: return plots.scaling_figure(self.project)
             return plots.cluster_composition(self.project)
 
         def done(out):

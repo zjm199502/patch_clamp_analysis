@@ -137,3 +137,15 @@ def test_mac_app_check(monkeypatch, tmp_path):
     rc["codesign"] = 1
     with pytest.raises(RuntimeError, match="签名"):
         updater._check_mac_app(app)
+
+
+def test_version_rule():
+    """0.1.0 → 0.1.1 … 0.1.10 → 0.2.0（大版本）。"""
+    import importlib.util
+    import pathlib
+    spec = importlib.util.spec_from_file_location("bump", pathlib.Path(__file__).parents[1] / "tools" / "bump_version.py")
+    bump = importlib.util.module_from_spec(spec); spec.loader.exec_module(bump)
+    v, seq = "0.1.0", []
+    for _ in range(11):
+        v = bump.bump(v, "patch"); seq.append(v)
+    assert seq[0] == "0.1.1" and seq[9] == "0.1.10" and seq[10] == "0.2.0"

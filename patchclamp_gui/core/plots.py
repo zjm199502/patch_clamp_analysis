@@ -441,3 +441,75 @@ def ei_figure(cell_e, cell_i) -> tuple[Figure, str]:
         txt.append("两段记录不是同时记录的，互相关不适用（互相关只对同一段记录中同时检测的 E 与 I 事件有意义）。")
     txt.append("注意：若 E 与 I 在不同钳制电位记录，电荷比受驱动力影响，应换算为电导后再比较。")
     return fig, "\n".join(txt)
+
+
+def cumulative_figure(project, metrics=("amplitude", "iei"), mode: str = "cell_average",
+                      n_per_cell: int = 100, log_iei: bool = True) -> tuple[Figure, str]:
+    """幅度与 IEI（及其他事件特征）的累积概率分布，多组叠加。
+
+    mode：
+    * "cell_average"（默认）：先求每个细胞自己的累积分布，再在公共网格上按细胞平均，阴影为 SEM。
+      每个细胞权重相同，是发表时最推荐的画法；
+    * "pooled_equal"：每个细胞等量抽取 n_per_cell 个事件后合并；
+    * "pooled_all"：所有事件直接合并（事件多的细胞权重更大，仅供展示）。
+    细细线为单个细胞。组间检验在细胞水平上做（每个细胞的中位数），而不是对合并事件做 KS。
+    """
+    events = project.events_table()
+    events = events[events["group"].astype(str) != ""]
+    groups = list(pd.unique(events["group"]))
+    cells_tab = project.cell_table()
+    cells_tab = cells_tab[cells_tab["group"].astype(str) != ""]
+    fig = new_figure(2.6 * len(metrics) + 0.4, 2.6)
+    axes = np.atleast_1d(fig.subplots(1, len(metrics)))
+    txt = [{"cell_average": "画法：每个细胞的累积分布按细胞平均（粗线 ± SEM 阴影），细线为单个细胞。",
+            "pooled_equal": f"画法：每个细胞等量抽取 {n_per_cell} 个事件后合并（粗线），细线为单个细胞。",
+            "pooled_all": "画法：全部事件合并（粗线；事件多的细胞权重更大，仅供展示），细线为单个细胞。"}[mode]]
+    rng = np.random.default_rng(0)
+    for ax, m in zip(axes, metrics):
+        vals_all = pd.to_numeric(events[m], errors="coerce")
+        vals_all = vals_all[np.isfinite(vals_all) & (vals_all > 0 if m == "iei" else True)]
+        if not len(vals_all):
+            ax.axis("off"); continue
+        lo, hi = np.nanpercentile(vals_all, [0.5, 99.5])
+        logx = m == "iei" and log_iei and lo > 0
+        grid = np.geomspace(lo, hi, 300) if logx else np.linspace(min(lo, 0) if m != "iei" else lo, hi, 300)
+        for gi, g in enumerate(groups):
+            col = PALETTE[gi % 6]
+            per_cell = []
+            pooled = []
+            for _, sub in events[events["group"] == g].groupby("cell"):
+                v = pd.to_numeric(sub[m], errors="coerce").to_numpy(float)
+                v = np.sort(v[np.isfinite(v) & ((v > 0) if m == "iei" else True)])
+                if len(v) < 5:
+                    continue
+                ax.plot(v, np.arange(1, len(v) + 1) / len(v), color=col, alpha=0.25, lw=0.4)
+                per_cell.append(np.searchsorted(v, grid, side="right") / len(v))
+                pooled.append(v if mode == "pooled_all" else rng.choice(v, n_per_cell, replace=len(v) < n_per_cell))
+            if not per_cell:
+                continue
+            if mode == "cell_average":
+                P = np.array(per_cell)
+                mu = P.mean(axis=0)
+                if len(P) > 1:
+                    se = P.std(axis=0, ddof=1) / np.sqrt(len(P))
+                    ax.fill_between(grid, mu - se, mu + se, color=col, alpha=0.25, lw=0)
+                ax.plot(grid, mu, color=col, lw=1.6, label=f"{g} (n={len(P)})")
+            else:
+                _cdf(ax, np.concatenate(pooled), color=col, lw=1.6, label=f"{g} (n={len(per_cell)})")
+        ax.set(xlabel=FEATURE_LABELS.get(m, m), ylabel="Cumulative probability", ylim=(0, 1.02))
+        if logx:
+            ax.set_xscale("log")
+        ax.legend(loc="best")
+        cm = "iei_median" if m == "iei" else f"{m}_median"
+        if len(groups) >= 2 and cm in cells_tab:
+            r = st.compare_groups(cells_tab, cm)
+            line = f"{FEATURE_LABELS.get(m, m)} 每个细胞的中位数：" + "，".join(
+                f"{g} {mm:.3g} ± {se:.2g}" for g, mm, se in zip(r["groups"], r["mean"], r["sem"]))
+            if np.isfinite(r.get("p", np.nan)):
+                line += f"（{r['test']}，p = {r['p']:.3g}）"
+                ax.set_title(f"p = {r['p']:.3g}")
+            txt.append(line)
+    if "iei" in metrics:
+        txt.append("IEI 分布右移 = 频率降低；左移 = 频率升高。IEI 横轴默认取对数。")
+    txt.append("统计以细胞为单位（比较每个细胞的中位数）。不要把所有事件合并后做 KS 检验：成百上千个事件会让微小差异也显著（伪重复）。")
+    return fig, "\n".join(txt)

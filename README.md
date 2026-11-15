@@ -76,7 +76,8 @@ pytest
 2. 如果换了依赖库、改了 `packaging/launcher.py`，或者新代码用到了以前没用过的标准库模块，把 `packaging/min_base.txt` 改成这个版本号（会重新打包整个程序）。
 3. 合并到 main 后，在 Actions → “Build and release” 里运行，填入版本号。
    - 每个版本都会进入软件内更新通道（GitHub 上名为 `updates` 的 pre-release）。
-   - 版本号末位是 0（x.y.0、x.y.10…）时，同时发布带安装包的正式 Release。
+   - 版本规则：x.y.0 是大版本，发布带安装包的正式 Release；之后的 x.y.1 … x.y.10 是小版本，只进入软件内更新；
+     x.y.10 之后的下一个版本是大版本 x.(y+1).0（`bump_version.py` 会自动进位）。例：0.1.0 → 0.1.1 → … → 0.1.10 → 0.2.0。
 
 ## 引用
 
