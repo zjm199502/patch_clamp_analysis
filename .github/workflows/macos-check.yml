@@ -1,0 +1,51 @@
+name: macOS build check
+
+# Builds and signs the Mac app without releasing anything, to check that the
+# signature (and notarization, once Apple secrets exist) works.
+on:
+  pull_request:
+    paths:
+      - "packaging/**"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/macos-check.yml"
+      - "pyproject.toml"
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-latest   # Apple silicon (arm64)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: python -m pip install . pyinstaller
+      - run: python -c "import patchclamp_gui; print(patchclamp_gui.__version__, end='')" > base_version.txt
+      - name: Build .app
+        run: |
+          pyinstaller --noconfirm --clean --windowed --name PatchClampAnalysis \
+            --osx-bundle-identifier org.patchclamp.analysis \
+            --add-data "base_version.txt:." \
+            --collect-submodules patchclamp_gui \
+            --collect-submodules pyqtgraph --collect-data pyqtgraph \
+            --collect-submodules miniml --collect-data miniml \
+            --exclude-module numba --exclude-module llvmlite --exclude-module umap \
+            --exclude-module PyQt5 --exclude-module PyQt6 --exclude-module qt_material \
+            --exclude-module tkinter packaging/launcher.py
+      - name: Sign, (optionally) notarize, zip and dmg
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash packaging/macos_sign.sh dist/PatchClampAnalysis.app PatchClampAnalysis-macOS-arm64
+      - name: Packaged app starts (offscreen smoke test)
+        run: |
+          QT_QPA_PLATFORM=offscreen ./dist/PatchClampAnalysis.app/Contents/MacOS/PatchClampAnalysis & pid=$!
+          sleep 25
+          kill -0 $pid && echo "still running after 25 s: ok"
+          kill $pid || true
+          codesign --verify --deep --strict dist/PatchClampAnalysis.app && echo "signature still valid after running"

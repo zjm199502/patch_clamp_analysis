@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "patchclamp-gui"
+dynamic = ["version"]
+description = "Patch-clamp analysis GUI: m/sEPSC and m/sIPSC detection (miniML), QC, kinetic clustering, deconvolution and hierarchical statistics"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "miniml-detect>=1.1.2",      # 事件检测（带入 tensorflow 2.14/2.15、numpy<2、pyabf、scipy、scikit-learn、matplotlib、h5py）
+    "pandas>=2.0",
+    "statsmodels>=0.14",
+    "PySide6>=6.5",
+    "pyqtgraph>=0.13.3",
+    "certifi",
+]
+
+[project.optional-dependencies]
+umap = ["umap-learn>=0.5"]
+dev = ["pytest>=7", "ruff"]
+
+[project.scripts]
+patchclamp-gui = "patchclamp_gui.gui.app:main"
+
+[project.urls]
+Homepage = "https://github.com/zjm199502/patch_clamp_analysis"
+Changelog = "https://github.com/zjm199502/patch_clamp_analysis/blob/main/CHANGELOG.md"
+
+[tool.setuptools.dynamic]
+version = { attr = "patchclamp_gui.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["patchclamp_gui*"]
+
+[tool.ruff]
+line-length = 130
+[tool.ruff.lint]
+select = ["F", "E9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore"]
