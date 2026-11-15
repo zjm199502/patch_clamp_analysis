@@ -4,7 +4,7 @@ Update channel: a single pre-release named "updates" on GitHub holds
     latest.json                          what the newest version is and how to get it
     patchclamp_gui-patch.zip              small update: just the patchclamp_gui package
     PatchClampAnalysis-*.zip              full builds, needed when libraries change
-Every 10th small version (x.y.0, x.y.10, ...) is also published as a normal
+Major versions (x.y.0; the version after x.y.10 is x.(y+1).0) are also published as a normal
 GitHub Release with installers.
 
 Full build assets (built by .github/workflows/release.yml):

@@ -5,9 +5,10 @@ name: Build and release
 #
 # Every version goes to the in-app update channel (pre-release "updates"):
 #   small update  = only the patchclamp_gui package (a few hundred KB)
-#   full build    = whole app, when x.y.0 / x.y.10 / ..., when force_full is set,
+#   full build    = whole app, for every major version x.y.0, when force_full is set,
 #                   or when packaging/min_base.txt names this version (libraries changed)
-# Every 10th version (patch number divisible by 10) is also a normal GitHub
+# Versions x.y.1 ... x.y.10 are small versions (update channel only). The next
+# version after x.y.10 is the major version x.(y+1).0, which is also a normal GitHub
 # Release with installers, for new users.
 on:
   workflow_dispatch:
@@ -53,7 +54,7 @@ jobs:
           test "$want" = "$have" || { echo "input $want != __version__ $have"; exit 1; }
           patch="${want##*.}"
           min_base=$(tr -d '[:space:]' < packaging/min_base.txt)
-          major=false; [ $((patch % 10)) -eq 0 ] && major=true
+          major=false; [ "$patch" -eq 0 ] && major=true
           full=$major; { [ "$FORCE" = "true" ] || [ "$min_base" = "$want" ]; } && full=true
           echo "version=$want" >> "$GITHUB_OUTPUT"
           echo "major=$major" >> "$GITHUB_OUTPUT"
@@ -179,7 +180,7 @@ jobs:
           print(json.dumps(m, ensure_ascii=False, indent=1))
           PY
           gh release upload updates latest.json --clobber
-      - name: Public release (every 10th version)
+      - name: Public release (major versions x.y.0)
         if: needs.test.outputs.major == 'true'
         run: |
           gh release view "v$VERSION" >/dev/null 2>&1 || \
