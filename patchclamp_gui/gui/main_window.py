@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import csv
+from dataclasses import replace
 import gc
 import threading
 import traceback
@@ -23,6 +24,7 @@ from ..core.cpu_budget import memory_lanes
 from ..core.cpu_budget import available, budget
 from ..core.session import DEFAULT_PARAMS, CellSession, Project
 from .update_ui import UpdateManager
+from .vector_export import figure_menu, plot_menu
 
 Qt = QtCore.Qt
 CLUSTER_COLORS = [QtGui.QColor(c) for c in plots.PALETTE]
@@ -76,6 +78,7 @@ class ZoomCanvas(FigureCanvasQTAgg):
     def __init__(self, fig):
         self._inches = fig.get_size_inches().copy()
         super().__init__(fig)
+        figure_menu(self)
         self.setMinimumSize(int(self._inches[0] * self.MIN_DPI), int(self._inches[1] * self.MIN_DPI))
 
     def resizeEvent(self, event):
@@ -301,6 +304,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self._tab_deconv(), "③ 去卷积平滑")
         self.tabs.addTab(self._tab_cluster(), "④ 动力学聚类")
         self.tabs.addTab(self._tab_analysis(), "⑤ 分析与统计")
+        for plot in (self.p_trace, self.p_det, self.p_ev, self.p_avg, self.pd1, self.pd2, self.pd3):
+            plot_menu(plot)
         self.progress = QtWidgets.QProgressBar()
         self.progress.setMinimumHeight(26)
         self.progress.setAlignment(Qt.AlignCenter)
@@ -489,6 +494,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                 + ["iei_cv", "avg_event_tau", "noise_rms"])
         self.an_metric.setCurrentText("amplitude_median")
         self.an_other = QtWidgets.QComboBox()
+        self.group_by = QtWidgets.QComboBox()
+        self.group_by.addItems(["组别", "动物"])
         self.an_other.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.an_other.setMinimumContentsLength(16)
         self.an_df = _spin(70, 1, 200, 5, 0, "mV")
@@ -515,6 +522,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 grid.addWidget(wd, r_, 2 * c_ + 1)
         grid.addWidget(self.an, 0, 1, 1, 3)
         grid.addWidget(b, 0, 4, 1, 2)
+        grid.addWidget(QtWidgets.QLabel("统计分组依据"), 2, 4)
+        grid.addWidget(self.group_by, 2, 5)
         grid.addWidget(self.clear_button("清除当前分析结果", "analysis"), 1, 4, 1, 2)
         grid.setColumnStretch(1, 3); grid.setColumnStretch(3, 2)
         for cb in (self.an, self.an_metric, self.an_cdf, self.an_other, self.an_df):
@@ -730,16 +739,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.statusBar().showMessage("文件夹中没有支持的记录")
                 return
             self.settings.setValue("last_dir", folder)
-            self.preview_files(list(groups), groups)
+            root = Path(folder)
+            levels = {path: [root.name or root.anchor, *Path(path).parent.relative_to(root).parts] for path in groups}
+            self.preview_files(list(groups), groups, levels)
 
-    def preview_files(self, paths, groups=None):
+    def preview_files(self, paths, groups=None, levels=None):
         from .review import preview_import
         decision = preview_import(self, paths, groups or {})
         if decision is not None:
             groups, presets = decision
-            self.add_files(paths, groups, presets)
+            self.add_files(paths, groups, presets, levels)
 
-    def add_files(self, paths, groups=None, presets=None):
+    def add_files(self, paths, groups=None, presets=None, levels=None):
         if self.project_root is None or self.workers:
             return
         paths = list(map(str, paths))
@@ -779,6 +790,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 dialog.setLabelText(f"复制到项目：{label}　已成功 {imported} 条")
                 record.path = str(wait_for_io(pool, project_files.copy_raw, self.project_root, p))
                 cell = CellSession(record, group=(groups or {}).get(p, ""))
+                cell.folders = levels[p] if levels is not None else [Path(p).parent.name]
                 preset = presets[p] if presets is not None else detection.preset_from_path(p)
                 if preset:
                     cell.params.update(detection.PRESETS[preset])
@@ -856,8 +868,26 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def refresh_cells(self):
         self.cell_table.blockSignals(True)
+        depth = max((len(c.folders) for c in self.project.cells), default=0)
+        table = self.cell_table
+        if table.columnCount() != 8 + depth:
+            table.setColumnCount(8 + depth)
+            self.cell_filters = {col: values for col, values in self.cell_filters.items() if col < 8 + depth}
+            if self.cell_sort and self.cell_sort[0] >= 8 + depth:
+                self.cell_sort = None
+            for level in range(depth):
+                table.setHorizontalHeaderItem(8 + level, QtWidgets.QTableWidgetItem(f"目录 {level+1}"))
+                header = table.horizontalHeader()
+                header.moveSection(header.visualIndex(8+level), header.visualIndex(1)+1+level)
+        labels = ["组别", "动物", *(f"目录 {index+1}" for index in range(depth)), "事件类型", "备注"]
+        if self.group_by.count() != len(labels):
+            previous = self.group_by.currentText()
+            self.group_by.clear(); self.group_by.addItems(labels)
+            self.group_by.setCurrentText(previous)
         self.cell_table.setRowCount(len(self.project.cells))
         for i, c in enumerate(self.project.cells):
+            for index in range(depth):
+                table.setItem(i, 8+index, QtWidgets.QTableWidgetItem(c.folders[index] if index < len(c.folders) else ""))
             n = int(c.mask().sum()) if c.events is not None else None
             vals = [c.name, c.group, c.animal, "" if n is None else str(n),
                     "" if n is None else f"{n / c.rec.duration:.2f}", c.note]
@@ -986,6 +1016,10 @@ class MainWindow(QtWidgets.QMainWindow):
             c.animal = it.text().strip()
         elif it.column() == 5:
             c.note = it.text()
+        elif it.column() >= 8:
+            index = it.column() - 8
+            c.folders.extend([""] * max(0, index + 1 - len(c.folders)))
+            c.folders[index] = it.text().strip()
         if self.cell_sort or self.cell_filters:
             self.update_cell_view()
 
@@ -1524,6 +1558,20 @@ class MainWindow(QtWidgets.QMainWindow):
         other = next((x for x in self.project.cells if x.name == self.an_other.currentText()), None)
         dfm = self.an_df.value()
         cdf_mode = ["cell_average", "pooled_equal", "pooled_all"][self.an_cdf.currentIndex()]
+        grouping = self.group_by.currentText()
+        criterion = self.group_by.currentIndex()
+        grouped = Project()
+        for cell in self.project.cells:
+            if grouping == "备注":
+                label = cell.note.strip()
+            elif grouping == "事件类型":
+                label = next((name for name, preset in detection.PRESETS.items()
+                              if all(cell.params[key] == val for key, val in preset.items())), "自定义")
+            else:
+                label = cell.group if criterion == 0 else cell.animal if criterion == 1 else (
+                cell.folders[criterion-2] if len(cell.folders) > criterion-2 else "")
+            if label:
+                grouped.cells.append(replace(cell, group=label))
 
         def job():
             if i == 0: return plots.cell_overview(c)
@@ -1536,17 +1584,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 if other is None or other.events is None or other is c:
                     return plots.new_figure(3, 2), "请在“I 细胞”中选择另一个已检测的记录（例如同一细胞在 0 mV 记录的 sIPSC）。"
                 return plots.ei_figure(c, other)
-            if len(self.project.analyzed()) < 2:
-                return plots.new_figure(3, 2), "组间分析需要至少 2 个已检测的细胞，并在左侧列表填写组别。"
-            if i == 7: return plots.group_comparison(self.project, metric)
-            if i == 8: return plots.cumulative_figure(self.project, mode=cdf_mode)
-            if i == 9: return plots.scaling_figure(self.project)
-            return plots.cluster_composition(self.project)
+            if len({cell.group for cell in grouped.analyzed()}) < 2:
+                return plots.new_figure(3, 2), f"按「{grouping}」比较需要至少两个非空组有检测结果。"
+            if i == 7: return plots.group_comparison(grouped, metric)
+            if i == 8: return plots.cumulative_figure(grouped, mode=cdf_mode)
+            if i == 9: return plots.scaling_figure(grouped)
+            return plots.cluster_composition(grouped)
 
         def done(out):
             self.qc_result_cell = c if i == 1 else None
             self.an_panel.show_result(*out)
-            self.archive_result(*out, dict(analysis=self.ANALYSES[i], analysis_members=sorted(cell.name for cell in self.project.cells), current=c.name if c else None, metric=metric,
+            self.archive_result(*out, dict(analysis=self.ANALYSES[i], grouping=grouping, group_labels={cell.name:cell.group for cell in grouped.cells}, analysis_members=sorted(cell.name for cell in self.project.cells), current=c.name if c else None, metric=metric,
                                 other=other.name if other else None, driving_force_mv=dfm, cdf_mode=cdf_mode), self.project.cells)
 
         self.run_bg(job, done, f"正在运行：{self.an.currentText()} …")

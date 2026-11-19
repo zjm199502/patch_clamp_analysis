@@ -30,6 +30,7 @@ class CellSession:
     t_wave: np.ndarray | None = None
     qc: dict = field(default_factory=dict)
     note: str = ""
+    folders: list[str] = field(default_factory=list)
     detected_signature: str = ""
     failure: str = ""
 

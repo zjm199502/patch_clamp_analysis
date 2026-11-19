@@ -34,4 +34,5 @@ def report_stamp(cell):
     review = ""
     if cell.events is not None:
         review = hashlib.sha256(cell.events.to_numpy(dtype=float).tobytes()).hexdigest()
-    return [signature(cell), cell.detected_signature, cell.group, cell.animal, review]
+    stamp = [signature(cell), cell.detected_signature, cell.group, cell.animal, review]
+    return stamp + [cell.folders.copy()] if cell.folders else stamp

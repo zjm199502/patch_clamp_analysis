@@ -65,6 +65,8 @@ def review_sweeps(parent, path, result, report, folder):
     figure = Figure(layout="constrained")
     fi, voltage, command = figure.subplots(3)
     canvas = FigureCanvasQTAgg(figure)
+    from .vector_export import figure_menu
+    figure_menu(canvas)
     layout.addWidget(canvas)
     rows = result["rows"]
     fi.plot([row["current_pA"] for row in rows], [row["rate_Hz"] for row in rows], "o", picker=6)

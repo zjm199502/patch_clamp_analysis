@@ -57,7 +57,7 @@ def save_project(root, project, destination=None):
                 relative = Path(rec.path).resolve().relative_to(root.resolve()).as_posix() if rec.path else ""
                 group.attrs["record"] = _json(dict(name=rec.name, fs=rec.fs, unit=rec.unit, channel=rec.channel, path=relative))
                 group.create_dataset("metadata", data=_json(rec.meta))
-                group.attrs["cell"] = _json(dict(group=cell.group, animal=cell.animal, note=cell.note, params=cell.params, qc=cell.qc,
+                group.attrs["cell"] = _json(dict(group=cell.group, animal=cell.animal, note=cell.note, folders=cell.folders, params=cell.params, qc=cell.qc,
                                                 detected_signature=cell.detected_signature, failure=cell.failure))
                 if not relative:
                     group.create_dataset("data", data=rec.data)
@@ -118,7 +118,10 @@ def open_project(root, source=None):
             else:
                 rec = Recording(data=group["data"][()], **info)
             rec.meta = json.loads(group["metadata"][()])
-            cell = CellSession(rec, **json.loads(group.attrs["cell"]))
+            attributes = json.loads(group.attrs["cell"])
+            if "folders" not in attributes and "/" in attributes.get("group", ""):
+                attributes["folders"] = attributes["group"].split("/")
+            cell = CellSession(rec, **attributes)
             for key in ("processed", "waves", "t_wave"):
                 if key in group:
                     setattr(cell, key, group[key][()])

@@ -473,6 +473,7 @@ def cumulative_figure(project, metrics=("amplitude", "iei"), mode: str = "cell_a
         lo, hi = np.nanpercentile(vals_all, [0.5, 99.5])
         logx = m == "iei" and log_iei and lo > 0
         grid = np.geomspace(lo, hi, 300) if logx else np.linspace(min(lo, 0) if m != "iei" else lo, hi, 300)
+        curves = {}
         for gi, g in enumerate(groups):
             col = PALETTE[gi % 6]
             per_cell = []
@@ -487,6 +488,7 @@ def cumulative_figure(project, metrics=("amplitude", "iei"), mode: str = "cell_a
                 pooled.append(v if mode == "pooled_all" else rng.choice(v, n_per_cell, replace=len(v) < n_per_cell))
             if not per_cell:
                 continue
+            curves[g] = np.asarray(per_cell)
             if mode == "cell_average":
                 P = np.array(per_cell)
                 mu = P.mean(axis=0)
@@ -500,6 +502,25 @@ def cumulative_figure(project, metrics=("amplitude", "iei"), mode: str = "cell_a
         if logx:
             ax.set_xscale("log")
         ax.legend(loc="best")
+        from itertools import combinations
+        from scipy.stats import permutation_test
+        comparisons = []
+        for first, second in combinations(curves, 2):
+            left, right = curves[first], curves[second]
+            if min(len(left), len(right)) < 2:
+                txt.append(f"{m}：{first} vs {second}，细胞数不足，未检验。")
+                continue
+            def distance(one, two):
+                return np.max(np.abs(one.mean(axis=0) - two.mean(axis=0)))
+            combined = np.concatenate([left, right])
+            def statistic(one, two):
+                return distance(combined[one], combined[two])
+            test = permutation_test((np.arange(len(left)), np.arange(len(left), len(combined))),
+                statistic, vectorized=False, alternative="greater", n_resamples=999, random_state=0)
+            comparisons.append((first, second, test.statistic, test.pvalue))
+        for first, second, delta, probability in comparisons:
+            txt.append(f"{m}：{first} vs {second}，平均细胞 CDF 最大差={delta:.3g}，"
+                       f"细胞标签置换 p（该指标内 Bonferroni 校正）={min(1., probability * len(comparisons)):.3g}。")
         cm = "iei_median" if m == "iei" else f"{m}_median"
         if len(groups) >= 2 and cm in cells_tab:
             r = st.compare_groups(cells_tab, cm)
@@ -511,5 +532,5 @@ def cumulative_figure(project, metrics=("amplitude", "iei"), mode: str = "cell_a
             txt.append(line)
     if "iei" in metrics:
         txt.append("IEI 分布右移 = 频率降低；左移 = 频率升高。IEI 横轴默认取对数。")
-    txt.append("统计以细胞为单位（比较每个细胞的中位数）。不要把所有事件合并后做 KS 检验：成百上千个事件会让微小差异也显著（伪重复）。")
+    txt.append("CDF 置换以细胞为单位，假设细胞独立，不是动物水平检验；同一动物的多个细胞不可当作独立动物。中位数比较是另外一项检验。")
     return fig, "\n".join(txt)

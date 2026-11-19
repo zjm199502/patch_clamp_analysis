@@ -230,6 +230,31 @@ def test_cell_filter_sort(tmp_path):
     window.close()
 
 
+def test_directory_columns_and_vector_export(tmp_path, monkeypatch):
+    import numpy as np
+    from xml.etree import ElementTree
+    from patchclamp_gui.gui.main_window import MainWindow
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow()
+    root = tmp_path / "project"
+    assert window.activate_project(root, create=True)
+    source = tmp_path / "input.npy"
+    np.save(source, np.arange(1000))
+    window.add_files([str(source)], levels={str(source): ["WT", "positive"]})
+    assert window.group_by.itemText(3) == "目录 2"
+    window.cell_table.item(0, 9).setText("negative")
+    assert window.current.folders == ["WT", "negative"]
+    target = tmp_path / "wave.svg"
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
+    window.show(); app.processEvents()
+    menu = window.p_trace.getViewBox().getMenu(None)
+    next(action for action in menu.actions() if "矢量" in action.text()).trigger()
+    assert ElementTree.parse(target).getroot().tag.endswith("svg")
+    window.close()
+    from patchclamp_gui.core.project_files import open_project
+    assert open_project(root).cells[0].folders == ["WT", "negative"]
+
+
 def test_import_preset_override_persists(tmp_path):
     import numpy as np
     from patchclamp_gui.core.detection import preset_from_path
