@@ -47,7 +47,7 @@ def _exp(t, a, tau):
 def extract_events(y: np.ndarray, fs: float, onsets: np.ndarray, direction: str = "negative",
                    window_ms: float = 30.0, baseline_ms: float = 2.0, smooth_ms: float = 0.3,
                    scores: np.ndarray | None = None, min_amplitude: float = 0.0,
-                   fit_decay: bool = True) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+                   fit_decay: bool = True, peak_stop=None) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     """返回 (事件表, 波形矩阵, 波形时间轴 ms)。
 
     波形以上升相 50% 点对齐、减去局部基线、事件方向翻为正，便于后续叠加与聚类。
@@ -80,6 +80,8 @@ def extract_events(y: np.ndarray, fs: float, onsets: np.ndarray, direction: str 
         if b0 < 0 or loc + 5 >= n:
             continue
         p_end = min(loc + search, n - 1, max(nxt + gap, loc + 5))
+        if peak_stop is not None:
+            p_end = min(peak_stop, n - 1)
         peak = loc + int(np.argmax(ys[loc:p_end + 1]))
         base = float(np.median(ys[b0:b1]))
         amp = float(np.mean(ys[max(peak - 1, 0):peak + 2]) - base)

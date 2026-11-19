@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 import h5py
@@ -41,12 +42,14 @@ def copy_raw(root, source):
         raise
 
 
-def save_project(root, project):
+def save_project(root, project, destination=None):
     root = Path(root)
     with tempfile.NamedTemporaryFile(dir=root, suffix=".tmp", delete=False) as stream:
         temporary = Path(stream.name)
     try:
         with h5py.File(temporary, "w") as store:
+            generation = uuid.uuid4().hex
+            store.attrs["generation"] = generation
             store.attrs["patchclamp_format"] = 1
             for index, cell in enumerate(project.cells):
                 group = store.create_group(str(index))
@@ -54,7 +57,8 @@ def save_project(root, project):
                 relative = Path(rec.path).resolve().relative_to(root.resolve()).as_posix() if rec.path else ""
                 group.attrs["record"] = _json(dict(name=rec.name, fs=rec.fs, unit=rec.unit, channel=rec.channel, path=relative))
                 group.create_dataset("metadata", data=_json(rec.meta))
-                group.attrs["cell"] = _json(dict(group=cell.group, animal=cell.animal, note=cell.note, params=cell.params, qc=cell.qc))
+                group.attrs["cell"] = _json(dict(group=cell.group, animal=cell.animal, note=cell.note, params=cell.params, qc=cell.qc,
+                                                detected_signature=cell.detected_signature, failure=cell.failure))
                 if not relative:
                     group.create_dataset("data", data=rec.data)
                 for key in ("processed", "waves", "t_wave"):
@@ -72,20 +76,37 @@ def save_project(root, project):
                     for key in ("onsets", "scores", "trace"):
                         if getattr(cell.det, key) is not None:
                             det.create_dataset(key, data=getattr(cell.det, key))
-        os.replace(temporary, root / SNAPSHOT)
+        os.replace(temporary, destination or root / SNAPSHOT)
+        if destination is None:
+            old = project.generation
+            project.generation = generation
+            if len(old) == 32 and all(char in "0123456789abcdef" for char in old):
+                shutil.rmtree(root / ".checkpoints" / old, ignore_errors=True)
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def open_project(root):
+def checkpoint(root, project, index):
+    folder = Path(root) / ".checkpoints" / project.generation
+    folder.mkdir(parents=True, exist_ok=True)
+    save_project(root, Project([project.cells[index]]), folder / f"{index}.h5")
+
+
+def open_project(root, source=None):
     from ..io import load_any
 
     root = Path(root).resolve()
     project = Project()
-    with h5py.File(root / SNAPSHOT, "r") as store:
+    with h5py.File(source or root / SNAPSHOT, "r") as store:
+        project.generation = store.attrs.get("generation", "")
         if store.attrs.get("patchclamp_format") != 1:
             raise ValueError("无法识别此项目格式")
         for index in range(len(store)):
+            if source is None and len(project.generation) == 32 and all(char in "0123456789abcdef" for char in project.generation):
+                recovered = root / ".checkpoints" / project.generation / f"{index}.h5"
+                if recovered.is_file():
+                    project.cells.extend(open_project(root, recovered).cells)
+                    continue
             group = store[str(index)]
             info = json.loads(group.attrs["record"])
             if info["path"]:

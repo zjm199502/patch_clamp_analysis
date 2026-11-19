@@ -30,6 +30,8 @@ class CellSession:
     t_wave: np.ndarray | None = None
     qc: dict = field(default_factory=dict)
     note: str = ""
+    detected_signature: str = ""
+    failure: str = ""
 
     @property
     def name(self) -> str:
@@ -73,7 +75,51 @@ class CellSession:
         df["excluded"] = False
         df["cluster"] = -1
         self.events, self.waves, self.t_wave = df, w, tw
+        from .provenance import signature
+        self.detected_signature = signature(self)
+        self.failure = ""
         return len(df)
+
+    def manual_candidate(self, left, right):
+        if self.events is None or self.processed is None or self.t_wave is None:
+            raise ValueError("请先运行事件检测。")
+        from .provenance import signature
+        if self.detected_signature and self.detected_signature != signature(self):
+            raise ValueError("记录或参数已改变，请重新检测后再补录。")
+        fs = self.rec.fs
+        start, stop = sorted(round(value * fs) for value in (left, right))
+        if start < 0 or stop >= len(self.processed) or stop - start < 3:
+            raise ValueError("选区超出记录或太短。")
+        win = len(self.t_wave) - int(np.count_nonzero(self.t_wave < 0))
+        margin = 2 * win + int(.004 * fs) + 8
+        offset = max(0, start - margin)
+        df, waves, axis = features.extract_events(self.processed[offset:stop+margin+1], fs, [start-offset],
+                self.params["direction"], win * 1000 / fs, peak_stop=stop-offset)
+        if df.empty or not np.array_equal(axis, self.t_wave):
+            raise ValueError("没有可测量的事件，或基线/衰减窗口不足。")
+        for column in ("peak_idx", "onset_idx"):
+            df[column] += offset
+        peak = int(df.peak_idx.iloc[0])
+        if peak in (start, stop) or (abs(self.events.peak_idx - peak) <= max(1, round(.001 * fs))).any():
+            raise ValueError("峰在选区边界，或已有事件位于该峰附近。")
+        df["time_s"] = df.onset_idx / fs
+        df["manual"], df["excluded"], df["cluster"] = True, False, -1
+        df["selection_start_s"], df["selection_end_s"] = start/fs, stop/fs
+        return df, waves
+
+    def accept_manual(self, candidate):
+        df, waves = candidate
+        previous = self.events.copy()
+        if "manual" not in previous:
+            previous["manual"] = False
+        merged = pd.concat([previous, df], ignore_index=True) if len(previous) else df.copy()
+        order = np.argsort(merged.time_s.to_numpy(), kind="stable")
+        self.events = merged.iloc[order].reset_index(drop=True)
+        self.events["iei"] = self.events.time_s.diff()
+        self.events["inst_freq"] = 1 / self.events.iei
+        self.events["cluster"] = -1
+        self.waves = np.concatenate((self.waves, waves))[order]
+        self.clear_qc_results()
 
     # ---- 有效事件（剔除人工排除的） ----
     def mask(self) -> np.ndarray:
@@ -107,6 +153,7 @@ class CellSession:
 @dataclass
 class Project:
     cells: list[CellSession] = field(default_factory=list)
+    generation: str = ""
 
     def analyzed(self) -> list[CellSession]:
         return [c for c in self.cells if c.events is not None and len(c.events)]

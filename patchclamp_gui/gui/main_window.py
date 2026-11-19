@@ -17,7 +17,9 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from .. import __version__, io
 from ..core import clustering, deconv, detection, plots, project_files
 from ..core.features import FEATURES
-from ..core import import_metadata
+from ..core import import_metadata, provenance
+from ..core import features
+from ..core.cpu_budget import memory_lanes
 from ..core.cpu_budget import available, budget
 from ..core.session import DEFAULT_PARAMS, CellSession, Project
 from .update_ui import UpdateManager
@@ -175,6 +177,7 @@ class MainWindow(QtWidgets.QMainWindow):
         m.addAction("打开已有项目…", self.choose_project, "Ctrl+Shift+O")
         self.project_actions.append(m.addAction("保存项目", self.save_session, "Ctrl+S"))
         self.project_actions.append(m.addAction("打开项目结果文件夹", self.show_results_folder))
+        self.project_actions.append(m.addAction("检查归档报告是否需要重算…", self.check_reports))
         m.addSeparator()
         self.project_actions.append(m.addAction("递归添加文件夹…", self.open_folder))
         self.project_actions.append(m.addAction("导出分组备注 CSV 模板…", lambda: self.annotation_csv(False)))
@@ -223,14 +226,16 @@ class MainWindow(QtWidgets.QMainWindow):
             raw = Path(filename).resolve()
             if not raw.is_relative_to(self.project_root / "raw"):
                 raw = project_files.copy_raw(self.project_root, filename)
-            result.update(analysis="内在兴奋性", raw=raw.relative_to(self.project_root).as_posix())
+            result.update(analysis="内在兴奋性", raw=raw.relative_to(self.project_root).as_posix(),
+                          raw_stamp=provenance.stamp(raw), version=__version__)
             minimum = result["lowest_spiking_positive_pA"]
             summary = f"最低诱发放电的正阶跃：{minimum} pA" if minimum is not None else "正阶跃未检出放电"
             lines = ["Sweep\t电流(pA)\tAP数\t频率(Hz)\t基线(mV)"]
             lines.extend(f"{r['sweep']}\t{r['current_pA']:g}\t{r['count']}\t{r['rate_Hz']:.2f}\t{r['baseline_mV']:.2f}" for r in rows)
             report = summary + "\n" + "\n".join(lines)
             folder = project_files.archive_result(self.project_root, fig, report, result)
-            QtWidgets.QMessageBox.information(self, "内在兴奋性", report + f"\n已保存：{folder}")
+            from .review import review_sweeps
+            review_sweeps(self, raw, result, report, folder)
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "分析未完成", str(exc))
 
@@ -240,8 +245,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cell_dock = dock
         dock.setFeatures(QtWidgets.QDockWidget.NoDockWidgetFeatures)
         w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
-        self.cell_table = QtWidgets.QTableWidget(0, 7)
-        self.cell_table.setHorizontalHeaderLabels(["文件", "组别", "动物", "事件数", "频率 Hz", "备注", "事件类型"])
+        self.cell_table = QtWidgets.QTableWidget(0, 8)
+        self.cell_table.setHorizontalHeaderLabels(["文件", "组别", "动物", "事件数", "频率 Hz", "备注", "事件类型", "检测状态"])
         self.cell_table.horizontalHeader().moveSection(6, 1)
         self.cell_table.setColumnWidth(6, 180)
         self.cell_table.horizontalHeader().setMinimumSectionSize(60)
@@ -345,7 +350,8 @@ class MainWindow(QtWidgets.QMainWindow):
             lab.setStyleSheet("color:#b00"); lab.setWordWrap(True); lab.setToolTip(why); form.addRow(lab)
         for label, fn in (("预览预处理", self.run_preprocess), ("检测当前细胞", self.run_detect_current),
                           ("应用当前参数到选中记录", self.apply_selected), ("按各自参数检测选中记录", self.run_detect_selected),
-                          ("按各自参数检测全部细胞", self.run_detect_all)):
+                          ("按各自参数检测全部细胞", self.run_detect_all),
+                          ("续跑未完成、失败或待重算记录", self.resume_detection)):
             b = QtWidgets.QPushButton(label); b.clicked.connect(fn); form.addRow(b)
         for label, action in (("清除当前细胞预处理及检测", "preprocess"), ("清除当前细胞检测", "detect"),
                               ("清除全部细胞检测…", "batch")):
@@ -363,6 +369,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.c_proc = self.p_trace.plot(pen=pg.mkPen("#222222"))
         self.c_events = pg.ScatterPlotItem(size=7, pen=None)
         self.p_trace.addItem(self.c_events)
+        self.manual_region = pg.LinearRegionItem((0, .01))
+        self.p_trace.addItem(self.manual_region, ignoreBounds=True)
+        self.manual_region.hide()
+        for label, callback in (("框选潜在事件", self.select_manual_event), ("测量并补录选区", self.measure_manual_event)):
+            button = QtWidgets.QPushButton(label)
+            button.clicked.connect(callback)
+            form.addRow(button)
         self.c_det = self.p_det.plot(pen=pg.mkPen("#4C72B0"))
         self.thr_line = pg.InfiniteLine(angle=0, pen=pg.mkPen("#C44E52", style=Qt.DashLine)); self.p_det.addItem(self.thr_line)
         return self.split_controls(form_w, self.glw)
@@ -640,7 +653,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def archive_result(self, fig, text, details, cells, arrays=None):
         try:
             details.update(version=__version__, records=[dict(name=cell.name, group=cell.group, animal=cell.animal,
-                params=cell.params, channel=cell.rec.channel, fs=cell.rec.fs, valid_events=int(cell.mask().sum()),
+                provenance=provenance.report_stamp(cell), params=cell.params, channel=cell.rec.channel, fs=cell.rec.fs, valid_events=int(cell.mask().sum()),
                 raw=Path(cell.rec.path).relative_to(self.project_root).as_posix() if cell.rec.path else None) for cell in cells])
             folder = project_files.archive_result(self.project_root, fig, text, details, arrays)
             self.statusBar().showMessage(f"分析结果已保存：{folder}")
@@ -648,6 +661,29 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "分析已完成，但结果未保存", str(error))
 
     # ================================================================ 细胞管理
+    def check_reports(self):
+        import json
+        current = {cell.name: provenance.report_stamp(cell) for cell in self.project.cells}
+        lines = []
+        for path in sorted((self.project_root / "results").glob("*/settings.json")):
+            try:
+                details = json.loads(path.read_text(encoding="utf-8"))
+                records = details.get("records", [])
+                if details.get("analysis") == "内在兴奋性" and "raw_stamp" in details:
+                    matches = details["version"] == __version__ and provenance.stamp(self.project_root / details["raw"]) == details["raw_stamp"]
+                    state = "一致" if matches else "需要重算"
+                elif not records or any("provenance" not in row for row in records):
+                    state = "未追踪"
+                elif any(current.get(row["name"]) != row["provenance"] for row in records) or (
+                        "analysis_members" in details and sorted(current) != details["analysis_members"]):
+                    state = "需要重算"
+                else:
+                    state = "一致"
+            except (KeyError, ValueError, OSError):
+                state = "无法校验"
+            lines.append(f"{state}　{path.parent.name}")
+        QtWidgets.QMessageBox.information(self, "归档报告状态", "\n".join(lines) or "尚无报告")
+
     def open_files(self):
         if self.project_root is None or self.workers:
             return
@@ -655,7 +691,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                                           "记录文件 (*.abf *.h5 *.hdf5 *.npy);;所有文件 (*)")
         if paths:
             self.settings.setValue("last_dir", os.path.dirname(paths[0]))
-            self.add_files(paths)
+            self.preview_files(paths)
 
     def annotation_csv(self, importing):
         if not self.project_root or self.workers:
@@ -694,9 +730,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.statusBar().showMessage("文件夹中没有支持的记录")
                 return
             self.settings.setValue("last_dir", folder)
-            self.add_files(list(groups), groups)
+            self.preview_files(list(groups), groups)
 
-    def add_files(self, paths, groups=None):
+    def preview_files(self, paths, groups=None):
+        from .review import preview_import
+        decision = preview_import(self, paths, groups or {})
+        if decision is not None:
+            groups, presets = decision
+            self.add_files(paths, groups, presets)
+
+    def add_files(self, paths, groups=None, presets=None):
         if self.project_root is None or self.workers:
             return
         paths = list(map(str, paths))
@@ -736,7 +779,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 dialog.setLabelText(f"复制到项目：{label}　已成功 {imported} 条")
                 record.path = str(wait_for_io(pool, project_files.copy_raw, self.project_root, p))
                 cell = CellSession(record, group=(groups or {}).get(p, ""))
-                preset = detection.preset_from_path(p)
+                preset = presets[p] if presets is not None else detection.preset_from_path(p)
                 if preset:
                     cell.params.update(detection.PRESETS[preset])
                 self.add_cell(cell, refresh=False)
@@ -831,6 +874,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.cell_table.setCellWidget(i, 6, combo)
             combo.setCurrentText(next((name for name, preset in detection.PRESETS.items()
                                        if all(c.params[key] == val for key, val in preset.items())), "自定义"))
+            state = QtWidgets.QTableWidgetItem(provenance.status(c))
+            state.setFlags(state.flags() & ~Qt.ItemIsEditable)
+            state.setToolTip(c.failure or state.text())
+            self.cell_table.setItem(i, 7, state)
         self.cell_table.blockSignals(False)
         self.update_cell_view()
         cur = self.an_other.currentText()
@@ -943,6 +990,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.update_cell_view()
 
     def on_cell_selected(self):
+        self.manual_region.hide()
         r = self.cell_table.currentRow()
         if not (0 <= r < len(self.project.cells)):
             return
@@ -1091,6 +1139,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def run_detect_all(self):
         self.detect_batch(list(self.project.cells))
 
+    def resume_detection(self):
+        pending = [cell for cell in self.project.cells if provenance.status(cell) != "已完成"]
+        if pending:
+            self.detect_batch(pending)
+        else:
+            self.statusBar().showMessage("所有记录均已完成，无需续跑")
+
     def selected_cells(self):
         return [self.project.cells[index.row()] for index in self.cell_table.selectionModel().selectedRows()
                 if not self.cell_table.isRowHidden(index.row())]
@@ -1133,16 +1188,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         limit = budget(self.settings.value("analysis/cpus", 0), available())
         serial = any(cell.params["detector"] == "miniML" for cell in cells)
-        lanes = 1 if serial else min(limit, len(cells))
+        lanes = 1 if serial else memory_lanes(min(limit, len(cells)), max(cell.rec.data.nbytes for cell in cells))
+        if self.workers or not self.save_session():
+            return
+        indexes = {id(cell): index for index, cell in enumerate(self.project.cells)}
 
         def job(report):
             from threadpoolctl import threadpool_limits
             pending = iter(enumerate(cells))
-            completed = total_events = 0
+            completed = total_events = failures = 0
             stopped = threading.Event()
 
             def process_lane():
-                nonlocal completed, total_events
+                nonlocal completed, total_events, failures
                 try:
                     while True:
                         with self.batch_condition:
@@ -1157,10 +1215,19 @@ class MainWindow(QtWidgets.QMainWindow):
                             index, cell = item
                             label = f"第 {index + 1} 条 · {cell.name[:36]}"
                             report(completed, f"预处理：{label}")
-                        cell.run_preprocess()
-                        with self.batch_condition:
-                            report(completed, f"检测：{label}")
-                        count = cell.run_detection()
+                        try:
+                            cell.run_preprocess()
+                            with self.batch_condition:
+                                report(completed, f"检测：{label}")
+                            count = cell.run_detection()
+                        except Exception as error:
+                            cell.clear_detection()
+                            cell.failure = str(error) or type(error).__name__
+                            count = 0
+                            with self.batch_condition:
+                                failures += 1
+                        if id(cell) in indexes:
+                            project_files.checkpoint(self.project_root, self.project, indexes[id(cell)])
                         with self.batch_condition:
                             total_events += count
                             completed += 1
@@ -1177,16 +1244,46 @@ class MainWindow(QtWidgets.QMainWindow):
                     future.result()
             if completed < len(cells):
                 return f"已取消：保留 {completed}/{len(cells)} 条已完成记录，共 {total_events} 个事件"
-            return f"批量检测完成：{completed} 个细胞，共 {total_events} 个事件"
+            return f"批量检测完成：处理 {completed} 条，失败 {failures} 条，共 {total_events} 个事件"
 
         self.run_bg(job, self._detected,
-                    f"正在批量检测 {len(cells)} 个细胞 …", total=len(cells))
+                    f"正在批量检测 {len(cells)} 个细胞，并行上限 {lanes} …", total=len(cells))
 
     def _detected(self, msg):
         self.statusBar().showMessage(msg)
         self.refresh_cells()
         self.refresh_trace()
         self.refresh_events()
+
+    def select_manual_event(self):
+        if self.current is None or self.current.events is None:
+            self.statusBar().showMessage("请先检测当前记录，再放大波形框选漏检事件。")
+            return
+        low, high = self.p_trace.viewRange()[0]
+        center = max(0, min(self.current.rec.duration, (low+high)/2))
+        width = min((high-low)/4, self.current.params["window_ms"] / 1000)
+        self.manual_region.setRegion((max(0, center-width/2), min(self.current.rec.duration, center+width/2)))
+        self.manual_region.show()
+        self.statusBar().showMessage("拖动阴影边界包住一个事件的起始和峰，再点击测量；基线取自框前。")
+
+    def measure_manual_event(self):
+        if self.current is None or not self.manual_region.isVisible():
+            return
+        try:
+            candidate = self.current.manual_candidate(*self.manual_region.getRegion())
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "不能补录", str(exc))
+            return
+        row = candidate[0].iloc[0]
+        text = f"峰时刻 {row.peak_idx/self.current.rec.fs:.5f} s\n" + "\n".join(
+            f"{features.FEATURE_LABELS[key]}: {row[key]:.3g}" for key in FEATURES)
+        if QtWidgets.QMessageBox.question(self, "确认人工补录（NaN 表示无法测量）", text,
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No) == QtWidgets.QMessageBox.Yes:
+            self.current.accept_manual(candidate)
+            self.dirty = True
+            self.manual_region.hide()
+            self.cluster_panel.clear_result(); self.an_panel.clear_result()
+            self._detected("已补录一个事件，可在审核页排除或恢复。")
 
     def refresh_trace(self, reset=False):
         c = self.current
@@ -1227,8 +1324,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.p_trace.enableAutoRange(); self.p_det.enableAutoRange()
 
     # ================================================================ 事件审核
-    EV_COLS = ["time_s", "amplitude", "rise_10_90", "decay_tau", "half_width", "charge", "score", "cluster", "excluded"]
-    EV_HEAD = ["时间 s", "幅度 pA", "上升 ms", "衰减τ ms", "半宽 ms", "电荷 fC", "得分", "簇", "排除"]
+    EV_COLS = ["time_s", "amplitude", "rise_10_90", "decay_tau", "half_width", "charge", "score", "cluster", "manual", "excluded"]
+    EV_HEAD = ["时间 s", "幅度 pA", "上升 ms", "衰减τ ms", "半宽 ms", "电荷 fC", "得分", "簇", "来源", "排除"]
 
     def refresh_events(self):
         c = self.current
@@ -1240,12 +1337,14 @@ class MainWindow(QtWidgets.QMainWindow):
         df = c.events
         self.ev_table.setColumnCount(len(self.EV_COLS)); self.ev_table.setHorizontalHeaderLabels(self.EV_HEAD)
         self.ev_table.setRowCount(len(df))
-        for i, row in enumerate(df[self.EV_COLS].itertuples(index=False)):
+        for i, row in enumerate(df.reindex(columns=self.EV_COLS, fill_value=False).itertuples(index=False)):
             for j, val in enumerate(row):
                 name = self.EV_COLS[j]
                 txt = ("是" if val else "") if name == "excluded" else (str(int(val) + 1) if name == "cluster" and val >= 0 else
                       ("" if name == "cluster" else f"{val:.3f}"))
                 it = QtWidgets.QTableWidgetItem(txt)
+                if name == "manual":
+                    it.setText("手动" if val else "自动")
                 if row[-1]:
                     it.setForeground(QtGui.QBrush(QtGui.QColor("#aaaaaa")))
                 self.ev_table.setItem(i, j, it)
@@ -1447,7 +1546,7 @@ class MainWindow(QtWidgets.QMainWindow):
         def done(out):
             self.qc_result_cell = c if i == 1 else None
             self.an_panel.show_result(*out)
-            self.archive_result(*out, dict(analysis=self.ANALYSES[i], current=c.name if c else None, metric=metric,
+            self.archive_result(*out, dict(analysis=self.ANALYSES[i], analysis_members=sorted(cell.name for cell in self.project.cells), current=c.name if c else None, metric=metric,
                                 other=other.name if other else None, driving_force_mv=dfm, cdf_mode=cdf_mode), self.project.cells)
 
         self.run_bg(job, done, f"正在运行：{self.an.currentText()} …")
