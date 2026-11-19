@@ -247,6 +247,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cell_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.cell_table.currentCellChanged.connect(self.on_cell_selected)
         self.cell_table.itemChanged.connect(self.on_cell_edited)
+        self.cell_filters = {}
+        self.cell_sort = None
+        header = self.cell_table.horizontalHeader()
+        header.setSectionsClickable(True)
+        header.sectionClicked.connect(self.sort_cell_column)
+        header.setContextMenuPolicy(Qt.CustomContextMenu)
+        header.customContextMenuRequested.connect(self.cell_header_menu)
+        header.setToolTip("点击列名升序/降序；右键按值筛选")
+        toolbar = QtWidgets.QHBoxLayout()
+        self.filter_summary = QtWidgets.QLabel("点击列名排序，右键筛选")
+        toolbar.addWidget(self.filter_summary, 1)
+        reset = QtWidgets.QPushButton("重置筛选/排序")
+        reset.clicked.connect(self.reset_cell_view)
+        toolbar.addWidget(reset)
+        v.addLayout(toolbar)
         v.addWidget(self.cell_table)
         row = QtWidgets.QHBoxLayout()
         for label, fn in (("添加文件", self.open_files), ("添加文件夹", self.open_folder), ("移除", self.remove_cell)):
@@ -581,6 +596,8 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "无法新建或打开项目", str(error)); return False
         if self.project_lock is not None and lock is not self.project_lock:
             self.project_lock.unlock()
+        self.cell_filters.clear()
+        self.cell_sort = None
         self.project_lock = lock
         self.release_project_resources()
         self.project, self.project_root, self.current = project, root, None
@@ -715,7 +732,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 record = wait_for_io(pool, io.load_any, p, ch)
                 dialog.setLabelText(f"复制到项目：{label}　已成功 {imported} 条")
                 record.path = str(wait_for_io(pool, project_files.copy_raw, self.project_root, p))
-                self.add_cell(CellSession(record, group=(groups or {}).get(p, "")), refresh=False)
+                cell = CellSession(record, group=(groups or {}).get(p, ""))
+                preset = detection.preset_from_path(p)
+                if preset:
+                    cell.params.update(detection.PRESETS[preset])
+                self.add_cell(cell, refresh=False)
                 imported += 1
             except Exception as e:
                 errors.append(f"{p}：{e}")
@@ -727,7 +748,7 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog.deleteLater()
         if imported:
             self.refresh_cells()
-            self.cell_table.selectRow(len(self.project.cells) - 1)
+            self.select_visible_cell(len(self.project.cells) - 1)
         self.statusBar().showMessage(f"导入结束：成功 {imported}/{total} 条，失败 {len(errors)} 条")
         if errors:
             QtWidgets.QMessageBox.warning(self, "部分文件读取失败", "\n".join(errors[:10]))
@@ -747,7 +768,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if not refresh:
             return
         self.refresh_cells()
-        self.cell_table.selectRow(len(self.project.cells) - 1)
+        self.select_visible_cell(len(self.project.cells) - 1)
+
+    def select_visible_cell(self, preferred):
+        table = self.cell_table
+        if not table.isRowHidden(preferred):
+            table.selectRow(preferred)
+        else:
+            for index in range(table.rowCount()):
+                row = table.verticalHeader().logicalIndex(index)
+                if not table.isRowHidden(row):
+                    table.selectRow(row)
+                    break
 
     def load_demo(self):
         if self.project_root is None or self.workers:
@@ -772,7 +804,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.current = None
             self.refresh_cells()
             if self.project.cells:
-                self.cell_table.selectRow(min(r, len(self.project.cells) - 1)); self.on_cell_selected()
+                self.select_visible_cell(min(r, len(self.project.cells) - 1)); self.on_cell_selected()
             else:
                 self.refresh_trace(); self.refresh_events(); self.clear_deconv_view()
 
@@ -797,8 +829,103 @@ class MainWindow(QtWidgets.QMainWindow):
             combo.setCurrentText(next((name for name, preset in detection.PRESETS.items()
                                        if all(c.params[key] == val for key, val in preset.items())), "自定义"))
         self.cell_table.blockSignals(False)
+        self.update_cell_view()
         cur = self.an_other.currentText()
         self.an_other.clear(); self.an_other.addItems([c.name for c in self.project.cells]); self.an_other.setCurrentText(cur)
+
+    def cell_value(self, row, column):
+        if column == 6:
+            return self.cell_table.cellWidget(row, 6).currentText()
+        return self.cell_table.item(row, column).text()
+
+    def sort_cell_column(self, column):
+        descending = self.cell_sort == (column, False)
+        self.cell_sort = column, descending
+        self.update_cell_view()
+
+    def reset_cell_view(self):
+        self.cell_filters.clear()
+        self.cell_sort = None
+        self.update_cell_view()
+
+    def cell_header_menu(self, position):
+        header = self.cell_table.horizontalHeader()
+        column = header.logicalIndexAt(position)
+        if column < 0:
+            return
+        values = sorted({self.cell_value(row, column) for row in range(self.cell_table.rowCount())})
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("筛选：" + self.cell_table.horizontalHeaderItem(column).text())
+        layout = QtWidgets.QVBoxLayout(dialog)
+        search = QtWidgets.QLineEdit()
+        search.setPlaceholderText("搜索选项（不改变勾选状态）")
+        layout.addWidget(search)
+        choices = QtWidgets.QListWidget()
+        layout.addWidget(choices)
+        allowed = self.cell_filters.get(column)
+        for value in values:
+            item = QtWidgets.QListWidgetItem(value or "（空白）", choices)
+            item.setData(Qt.UserRole, value)
+            item.setCheckState(Qt.Checked if allowed is None or value in allowed else Qt.Unchecked)
+        def items():
+            return (choices.item(index) for index in range(choices.count()))
+        def search_values(term):
+            for item in items():
+                item.setHidden(term.casefold() not in item.text().casefold())
+        search.textChanged.connect(search_values)
+        def mark(state):
+            for item in items():
+                if not item.isHidden():
+                    item.setCheckState(state)
+        for label, state in (("全选搜索结果", Qt.Checked), ("取消勾选搜索结果", Qt.Unchecked)):
+            button = QtWidgets.QPushButton(label)
+            button.clicked.connect(lambda _, value=state: mark(value))
+            layout.addWidget(button)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec():
+            selected = {item.data(Qt.UserRole) for item in items() if item.checkState() == Qt.Checked}
+            if len(selected) == len(values):
+                self.cell_filters.pop(column, None)
+            else:
+                self.cell_filters[column] = selected
+            self.update_cell_view()
+        dialog.deleteLater()
+
+    def update_cell_view(self):
+        table = self.cell_table
+        order = list(range(table.rowCount()))
+        header = table.horizontalHeader()
+        header.setSortIndicatorShown(self.cell_sort is not None)
+        if self.cell_sort:
+            column, descending = self.cell_sort
+            def key(row):
+                value = self.cell_value(row, column)
+                return float(value or "-inf") if column in (3, 4) else value.casefold()
+            order.sort(key=key, reverse=descending)
+            header.setSortIndicator(column, Qt.DescendingOrder if descending else Qt.AscendingOrder)
+        vertical = table.verticalHeader()
+        visible = []
+        for index, row in enumerate(order):
+            old = vertical.visualIndex(row)
+            if old != index:
+                vertical.moveSection(old, index)
+            hidden = any(self.cell_value(row, col) not in selected for col, selected in self.cell_filters.items())
+            table.setRowHidden(row, hidden)
+            if not hidden:
+                visible.append(row)
+            elif table.selectionModel().isRowSelected(row, QtCore.QModelIndex()):
+                table.selectionModel().select(table.model().index(row, 0), QtCore.QItemSelectionModel.Deselect | QtCore.QItemSelectionModel.Rows)
+        if table.currentRow() >= 0 and table.isRowHidden(table.currentRow()):
+            if visible:
+                table.selectRow(visible[0])
+            else:
+                table.setCurrentCell(-1, -1)
+                self.current = None
+                self.clear_deconv_view(); self.refresh_trace(); self.refresh_events()
+        self.filter_summary.setText(f"显示 {len(visible)}/{len(order)} 条 · " + ("筛选中" if self.cell_filters else "右键列名筛选"))
 
     def on_cell_edited(self, it):
         self.dirty = True
@@ -809,6 +936,8 @@ class MainWindow(QtWidgets.QMainWindow):
             c.animal = it.text().strip()
         elif it.column() == 5:
             c.note = it.text()
+        if self.cell_sort or self.cell_filters:
+            self.update_cell_view()
 
     def on_cell_selected(self):
         r = self.cell_table.currentRow()
@@ -960,7 +1089,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.detect_batch(list(self.project.cells))
 
     def selected_cells(self):
-        return [self.project.cells[index.row()] for index in self.cell_table.selectionModel().selectedRows()]
+        return [self.project.cells[index.row()] for index in self.cell_table.selectionModel().selectedRows()
+                if not self.cell_table.isRowHidden(index.row())]
 
     def apply_selected(self):
         params = self.read_params()

@@ -198,3 +198,58 @@ def test_project_resource_lifetime(tmp_path):
     window.close()
     assert window.project_root is None and window.project_lock is None
     assert cell_ref() is None and buffer_ref() is None
+
+
+def test_cell_filter_sort(tmp_path):
+    import numpy as np
+    from patchclamp_gui.gui.main_window import MainWindow
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow()
+    assert window.activate_project(tmp_path / "filtered", create=True)
+    paths = []
+    for name in ("c", "a", "b"):
+        path = tmp_path / (name + ".npy")
+        np.save(path, np.zeros(1000))
+        paths.append(str(path))
+    window.add_files(paths, {paths[0]: "one", paths[1]: "two", paths[2]: "one"})
+    table = window.cell_table
+    window.sort_cell_column(0)
+    assert table.verticalHeader().logicalIndex(0) == 1
+    window.cell_filters[1] = {"one"}
+    window.update_cell_view()
+    assert table.isRowHidden(1)
+    table.selectAll()
+    assert {cell.group for cell in window.selected_cells()} == {"one"}
+    table.selectRow(2)
+    table.item(2, 5).setText("edited")
+    assert window.current is window.project.cells[2] and window.current.note == "edited"
+    window.remove_cell()
+    assert len(window.project.cells) == 2
+    window.reset_cell_view()
+    assert not table.isRowHidden(1) and table.verticalHeader().logicalIndex(0) == 0
+    window.close()
+
+
+def test_import_preset_override_persists(tmp_path):
+    import numpy as np
+    from patchclamp_gui.core.detection import preset_from_path
+    from patchclamp_gui.gui.main_window import MainWindow
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow()
+    root = tmp_path / "project"
+    assert window.activate_project(root, create=True)
+    folder = tmp_path / "sIpSc"
+    folder.mkdir()
+    files = [folder / "record.npy", folder / "mePSc1.npy"]
+    for path in files:
+        np.save(path, np.zeros(1000))
+    window.add_files(files)
+    assert [cell.params["direction"] for cell in window.project.cells] == ["positive", "negative"]
+    assert preset_from_path(folder / "EPSC_IPSC.npy") is None
+    window.apply_preset(0, "mEPSC / sEPSC")
+    assert window.save_session()
+    window.close()
+    other = MainWindow()
+    assert other.activate_project(root)
+    assert other.project.cells[0].params["direction"] == "negative"
+    other.close()

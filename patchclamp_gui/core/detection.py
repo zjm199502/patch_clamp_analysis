@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
@@ -13,6 +14,20 @@ PRESETS = {
     "mIPSC / sIPSC（高氯内液，内向）": dict(direction="negative", window_ms=80.0, tau_rise_ms=0.6, tau_decay_ms=12.0),
     "mIPSC / sIPSC（低氯内液，外向）": dict(direction="positive", window_ms=80.0, tau_rise_ms=0.6, tau_decay_ms=12.0),
 }
+
+
+def preset_from_path(path):
+    path = Path(path)
+    for part in (path.stem, *(parent.name for parent in path.parents)):
+        excitatory = "epsc" in part.casefold()
+        inhibitory = "ipsc" in part.casefold()
+        if excitatory and inhibitory:
+            return None
+        if excitatory:
+            return "mEPSC / sEPSC"
+        if inhibitory:
+            return "mIPSC / sIPSC（低氯内液，外向）"
+    return None
 
 
 @dataclass
