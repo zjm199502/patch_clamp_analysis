@@ -150,7 +150,7 @@ def test_cancel_paused_batch(tmp_path):
         started.set()
         assert release.wait(5)
 
-    cell = SimpleNamespace(name="test", run_preprocess=preprocess, run_detection=lambda: completed.append(True) or 1)
+    cell = SimpleNamespace(name="test", params={"detector": "miniML"}, run_preprocess=preprocess, run_detection=lambda: completed.append(True) or 1)
     window.detect_batch([cell, cell])
     assert started.wait(5)
     window.pause_button.click()

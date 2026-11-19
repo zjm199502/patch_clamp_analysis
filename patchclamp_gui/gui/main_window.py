@@ -18,6 +18,7 @@ from .. import __version__, io
 from ..core import clustering, deconv, detection, plots, project_files
 from ..core.features import FEATURES
 from ..core import import_metadata
+from ..core.cpu_budget import available, budget
 from ..core.session import DEFAULT_PARAMS, CellSession, Project
 from .update_ui import UpdateManager
 
@@ -194,6 +195,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for action in self.project_actions:
             action.setEnabled(False)
         view = self.menuBar().addMenu("视图")
+        performance = self.menuBar().addMenu("性能")
+        performance.addAction("分析 CPU 核心数…", self.choose_cpu_count)
         view.addAction("放大界面文字", lambda: self.set_ui_points(self.font().pointSize() + 1), "Ctrl+=")
         view.addAction("缩小界面文字", lambda: self.set_ui_points(self.font().pointSize() - 1), "Ctrl+-")
         view.addAction("恢复默认字号", lambda: self.set_ui_points(10), "Ctrl+0")
@@ -1112,27 +1115,69 @@ class MainWindow(QtWidgets.QMainWindow):
     def run_detect_selected(self):
         self.detect_batch(self.selected_cells())
 
+    def choose_cpu_count(self):
+        capacity = available()
+        previous = self.settings.value("analysis/cpus", 0, type=int)
+        value, ok = QtWidgets.QInputDialog.getInt(self, "分析 CPU 核心数",
+            f"可用逻辑核心：{capacity}。0 = 自动 70%（{budget(0, capacity)} 核）。\n"
+            "去卷积并行数下次批处理生效；数值库和 miniML 线程设置重启后生效。",
+            min(capacity, max(0, previous)), 0, capacity)
+        if ok:
+            self.settings.setValue("analysis/cpus", value)
+            self.settings.sync()
+
     def detect_batch(self, cells):
         if not cells:
             self.statusBar().showMessage("请先选择要检测的记录。")
             return
 
+        limit = budget(self.settings.value("analysis/cpus", 0), available())
+        serial = any(cell.params["detector"] == "miniML" for cell in cells)
+        lanes = 1 if serial else min(limit, len(cells))
+
         def job(report):
-            tot = 0
-            for index, c in enumerate(cells):
-                with self.batch_condition:
-                    if self.batch_paused and not self.batch_cancelled:
-                        report(index, "已暂停，等待继续")
-                    self.batch_condition.wait_for(lambda: not self.batch_paused or self.batch_cancelled)
-                    if self.batch_cancelled:
-                        return f"已取消：保留 {index}/{len(cells)} 条已完成记录，共 {tot} 个事件"
-                label = f"第 {index + 1} 条 · {c.name[:36]}"
-                report(index, f"预处理：{label}")
-                c.run_preprocess()
-                report(index, f"检测：{label}")
-                tot += c.run_detection()
-                report(index + 1, f"已完成：{label}")
-            return f"批量检测完成：{len(cells)} 个细胞，共 {tot} 个事件"
+            from threadpoolctl import threadpool_limits
+            pending = iter(enumerate(cells))
+            completed = total_events = 0
+            stopped = threading.Event()
+
+            def process_lane():
+                nonlocal completed, total_events
+                try:
+                    while True:
+                        with self.batch_condition:
+                            if self.batch_paused and not self.batch_cancelled:
+                                report(completed, "已暂停，等待继续")
+                            self.batch_condition.wait_for(lambda: not self.batch_paused or self.batch_cancelled or stopped.is_set())
+                            if self.batch_cancelled or stopped.is_set():
+                                return
+                            item = next(pending, None)
+                            if item is None:
+                                return
+                            index, cell = item
+                            label = f"第 {index + 1} 条 · {cell.name[:36]}"
+                            report(completed, f"预处理：{label}")
+                        cell.run_preprocess()
+                        with self.batch_condition:
+                            report(completed, f"检测：{label}")
+                        count = cell.run_detection()
+                        with self.batch_condition:
+                            total_events += count
+                            completed += 1
+                            report(completed, f"已完成：{label}")
+                except BaseException:
+                    with self.batch_condition:
+                        stopped.set()
+                        self.batch_condition.notify_all()
+                    raise
+
+            with threadpool_limits(limits=1 if lanes > 1 else limit), ThreadPoolExecutor(max_workers=lanes) as pool:
+                futures = [pool.submit(process_lane) for _ in range(lanes)]
+                for future in futures:
+                    future.result()
+            if completed < len(cells):
+                return f"已取消：保留 {completed}/{len(cells)} 条已完成记录，共 {total_events} 个事件"
+            return f"批量检测完成：{completed} 个细胞，共 {total_events} 个事件"
 
         self.run_bg(job, self._detected,
                     f"正在批量检测 {len(cells)} 个细胞 …", total=len(cells))

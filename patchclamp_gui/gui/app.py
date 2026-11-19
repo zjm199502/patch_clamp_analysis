@@ -8,6 +8,12 @@ from PySide6.QtWidgets import QApplication
 
 
 def main():
+    from PySide6.QtCore import QSettings
+    from ..core.cpu_budget import available, budget
+    limit = budget(QSettings("PatchClampAnalysis", "PatchClampAnalysis").value("analysis/cpus", 0), available())
+    for variable in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS", "TF_NUM_INTRAOP_THREADS"):
+        os.environ[variable] = str(limit)
+    os.environ["TF_NUM_INTEROP_THREADS"] = "1"
     import pyqtgraph as pg
 
     pg.setConfigOptions(antialias=False, background="w", foreground="k")
