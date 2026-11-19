@@ -21,16 +21,18 @@ CLUSTER_COLORS = [QtGui.QColor(c) for c in plots.PALETTE]
 
 
 class Worker(QtCore.QThread):
+    advanced = QtCore.Signal(int, str)
     done = QtCore.Signal(object)
     failed = QtCore.Signal(str)
 
-    def __init__(self, fn, parent=None):
+    def __init__(self, fn, parent=None, tracked=False):
         super().__init__(parent)
         self.fn = fn
+        self.tracked = tracked
 
     def run(self):
         try:
-            self.done.emit(self.fn())
+            self.done.emit(self.fn(self.advanced.emit) if self.tracked else self.fn())
         except Exception:
             self.failed.emit(traceback.format_exc())
 
@@ -165,6 +167,8 @@ class MainWindow(QtWidgets.QMainWindow):
             m.addAction(act)
             if fn != self.close:
                 self.project_actions.append(act)
+        intrinsic_menu = self.menuBar().addMenu("内在兴奋性")
+        self.project_actions.append(intrinsic_menu.addAction("分析电流阶跃 ABF…", self.analyze_intrinsic))
         for action in self.project_actions:
             action.setEnabled(False)
         view = self.menuBar().addMenu("视图")
@@ -172,6 +176,38 @@ class MainWindow(QtWidgets.QMainWindow):
         view.addAction("缩小界面文字", lambda: self.set_ui_points(self.font().pointSize() - 1), "Ctrl+-")
         view.addAction("恢复默认字号", lambda: self.set_ui_points(10), "Ctrl+0")
         self.updates = UpdateManager(self)      # “帮助”菜单：检查更新 / 自动检查 / 关于
+
+    def analyze_intrinsic(self):
+        if not self.project_root or self.workers:
+            return
+        from ..core.intrinsic import analyze_abf
+        from matplotlib.figure import Figure
+        filename, _ = QtWidgets.QFileDialog.getOpenFileName(self, "选择电流钳阶跃记录", "", "ABF (*.abf)")
+        if not filename:
+            return
+        threshold, ok = QtWidgets.QInputDialog.getDouble(self, "动作电位检测", "最低峰电压 (mV)，不是起始阈电位", 0, -60, 60, 1)
+        if not ok:
+            return
+        try:
+            result = analyze_abf(filename, threshold)
+            rows = result["rows"]
+            fig = Figure()
+            axis = fig.subplots()
+            axis.plot([row["current_pA"] for row in rows], [row["rate_Hz"] for row in rows], "o")
+            axis.set(xlabel="Injected current (pA)", ylabel="Firing rate (Hz)", title="F-I")
+            raw = Path(filename).resolve()
+            if not raw.is_relative_to(self.project_root / "raw"):
+                raw = project_files.copy_raw(self.project_root, filename)
+            result.update(analysis="内在兴奋性", raw=raw.relative_to(self.project_root).as_posix())
+            minimum = result["lowest_spiking_positive_pA"]
+            summary = f"最低诱发放电的正阶跃：{minimum} pA" if minimum is not None else "正阶跃未检出放电"
+            lines = ["Sweep\t电流(pA)\tAP数\t频率(Hz)\t基线(mV)"]
+            lines.extend(f"{r['sweep']}\t{r['current_pA']:g}\t{r['count']}\t{r['rate_Hz']:.2f}\t{r['baseline_mV']:.2f}" for r in rows)
+            report = summary + "\n" + "\n".join(lines)
+            folder = project_files.archive_result(self.project_root, fig, report, result)
+            QtWidgets.QMessageBox.information(self, "内在兴奋性", report + f"\n已保存：{folder}")
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "分析未完成", str(exc))
 
     def _build_ui(self):
         # ---- 左侧：文件/细胞列表 ----
@@ -212,8 +248,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self._tab_deconv(), "③ 去卷积平滑")
         self.tabs.addTab(self._tab_cluster(), "④ 动力学聚类")
         self.tabs.addTab(self._tab_analysis(), "⑤ 分析与统计")
-        self.progress = QtWidgets.QProgressBar(); self.progress.setMaximumWidth(180); self.progress.hide()
-        self.statusBar().addPermanentWidget(self.progress)
+        self.progress = QtWidgets.QProgressBar()
+        self.progress.setMinimumHeight(26)
+        self.progress.setAlignment(Qt.AlignCenter)
+        self.progress.hide()
+        self.statusBar().addPermanentWidget(self.progress, 1)
+        self.task_clock = QtCore.QElapsedTimer()
+        self.task_timer = QtCore.QTimer(self)
+        self.task_timer.timeout.connect(self.update_task_status)
 
     def _tab_detect(self):
         form_w = QtWidgets.QWidget(); form = QtWidgets.QFormLayout(form_w)
@@ -680,7 +722,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.d["tau_rise"].setValue(params["tau_rise_ms"]); self.d["tau_decay"].setValue(params["tau_decay_ms"])
 
     # ================================================================ 后台任务
-    def run_bg(self, fn, on_done, msg):
+    def update_task_status(self):
+        seconds = self.task_clock.elapsed() // 1000
+        self.statusBar().showMessage(f"{self.task_stage} · 已用 {seconds // 60:02d}:{seconds % 60:02d}")
+
+    @QtCore.Slot(int, str)
+    def batch_advanced(self, completed, stage):
+        self.progress.setValue(completed)
+        self.task_stage = stage
+        self.update_task_status()
+
+    def run_bg(self, fn, on_done, msg, total=0):
         if self.workers or self.project_root is None:
             return
         self.dirty = True
@@ -688,12 +740,20 @@ class MainWindow(QtWidgets.QMainWindow):
         for action in self.project_actions:
             action.setEnabled(False)
         self.last_error = None
-        self.statusBar().showMessage(msg)
-        self.progress.setRange(0, 0); self.progress.show()
-        wk = Worker(fn, self)
+        self.task_stage = msg
+        self.task_clock.start()
+        self.update_task_status()
+        self.task_timer.start(1000)
+        self.progress.setRange(0, total)
+        self.progress.setFormat("已完成 %v / %m 条（%p%）" if total else "")
+        self.progress.setValue(0)
+        self.progress.show()
+        wk = Worker(fn, self, tracked=bool(total))
+        wk.advanced.connect(self.batch_advanced)
         self.workers.append(wk)
 
         def unlock():
+            self.task_timer.stop()
             self.progress.hide(); self.workers.remove(wk)
             self.tabs.setEnabled(True); self.cell_dock.setEnabled(True)
             for action in self.project_actions:
@@ -769,15 +829,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("请先选择要检测的记录。")
             return
 
-        def job():
+        def job(report):
             tot = 0
-            for c in cells:
+            for index, c in enumerate(cells):
+                label = f"第 {index + 1} 条 · {c.name[:36]}"
+                report(index, f"预处理：{label}")
                 c.run_preprocess()
+                report(index, f"检测：{label}")
                 tot += c.run_detection()
+                report(index + 1, f"已完成：{label}")
             return tot
 
         self.run_bg(job, lambda n: self._detected(f"批量检测完成：{len(cells)} 个细胞，共 {n} 个事件"),
-                    f"正在批量检测 {len(cells)} 个细胞 …")
+                    f"正在批量检测 {len(cells)} 个细胞 …", total=len(cells))
 
     def _detected(self, msg):
         self.statusBar().showMessage(msg)

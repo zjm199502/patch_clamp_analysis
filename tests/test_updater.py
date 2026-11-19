@@ -33,6 +33,7 @@ class _Resp:
 
 
 def test_check_latest_and_prepare(monkeypatch, tmp_path):
+    monkeypatch.setattr(updater, "install_root", lambda: tmp_path)
     name = updater.asset_name() or "PatchClampAnalysis-Windows.zip"
     monkeypatch.setattr(updater, "asset_name", lambda: name)
     rel_json = {"tag_name": "v99.0.0", "body": "notes", "html_url": "https://x/r",
@@ -72,6 +73,7 @@ def test_no_update_when_same(monkeypatch):
 
 
 def test_channel_patch_and_full(monkeypatch, tmp_path):
+    monkeypatch.setattr(updater, "install_root", lambda: tmp_path)
     from patchclamp_gui import patching
     man = {"version": "99.0.3", "notes": "n", "min_base": "99.0.1",
            "patch": {"url": "https://x/p.zip", "size": 5},
@@ -89,6 +91,9 @@ def test_channel_patch_and_full(monkeypatch, tmp_path):
     monkeypatch.setattr(patching, "base_version", lambda: "0.2.0")
     r = updater.check_latest()
     assert r.kind == "full" and r.asset_url == "https://x/w.zip"
+    (tmp_path / "unins000.exe").touch()
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    assert updater.check_latest().kind == "page"
     # running from source -> only the download page
     monkeypatch.setattr(patching, "base_version", lambda: None)
     assert updater.check_latest().kind in ("full", "page")
@@ -140,12 +145,12 @@ def test_mac_app_check(monkeypatch, tmp_path):
 
 
 def test_version_rule():
-    """0.1.0 → 0.1.1 … 0.1.10 → 0.2.0（大版本）。"""
+    """0.1.0 → 0.1.1 … 0.1.20 → 0.2.0（大版本）。"""
     import importlib.util
     import pathlib
     spec = importlib.util.spec_from_file_location("bump", pathlib.Path(__file__).parents[1] / "tools" / "bump_version.py")
     bump = importlib.util.module_from_spec(spec); spec.loader.exec_module(bump)
     v, seq = "0.1.0", []
-    for _ in range(11):
+    for _ in range(21):
         v = bump.bump(v, "patch"); seq.append(v)
-    assert seq[0] == "0.1.1" and seq[9] == "0.1.10" and seq[10] == "0.2.0"
+    assert seq[0] == "0.1.1" and seq[19] == "0.1.20" and seq[20] == "0.2.0"

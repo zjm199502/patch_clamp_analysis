@@ -8,6 +8,10 @@ Windows 用户请从正式 Release 下载 **ClampTrace-Windows-Setup.exe**，运
 
 ## 功能
 
+**内在兴奋性（电流钳）**：打开项目，从「内在兴奋性 → 分析电流阶跃 ABF」选择单通道 mV/pA 文件。程序从 ABF 指令找出各 sweep 时间对齐、幅值变化且返回保持电流的单一长方波（≥100 ms），忽略固定测试脉冲。直接分析原始电压，不套用突触事件滤波器。
+结果包含 F–I 图、逐 sweep 峰时刻、放电数、平均频率（峰数/阶跃时长）、刺激前 50 ms 基线及末 10% 电压中位数。默认峰高 ≥0 mV、突出度 ≥15 mV、峰间距 ≥2 ms；峰高可调。最低诱发放电的正阶跃只是测试档位，不是精确阈电流。每次运行独立保存在项目 results 中。
+指标选择参考 [CA1 纵轴电生理比较研究](https://pmc.ncbi.nlm.nih.gov/articles/PMC4760884/) 和 [Allen 电生理特征说明](https://brain-map.org/support/documentation/cell-types-database-api)；这里的频率是窗口平均值，不是瞬时频率的均值。当前不从单一固定负测试脉冲推算输入电阻或 sag。
+
 ![检测](docs/images/detect.png)
 
 | 页面 | 内容 |
@@ -82,8 +86,8 @@ pytest
 2. 如果换了依赖库、改了 `packaging/launcher.py`，或者新代码用到了以前没用过的标准库模块，把 `packaging/min_base.txt` 改成这个版本号（会重新打包整个程序）。
 3. 合并到 main 后，在 Actions → “Build and release” 里运行，填入版本号。
    - 每个版本都会进入软件内更新通道（GitHub 上名为 `updates` 的 pre-release）。
-   - 版本规则：x.y.0 是大版本，发布带安装包的正式 Release；之后的 x.y.1 … x.y.10 是小版本，只进入软件内更新；
-     x.y.10 之后的下一个版本是大版本 x.(y+1).0（`bump_version.py` 会自动进位）。例：0.1.0 → 0.1.1 → … → 0.1.10 → 0.2.0。
+   - 版本规则：x.y.0 是大版本，发布带安装包的正式 Release；之后的 x.y.1 … x.y.20 是小版本，只进入软件内更新；
+     x.y.20 之后的下一个版本是大版本 x.(y+1).0（`bump_version.py` 会自动进位）。例：0.1.0 → 0.1.1 → … → 0.1.20 → 0.2.0。
 
 ## 引用
 

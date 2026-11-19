@@ -7,8 +7,8 @@ name: Build and release
 #   small update  = only the patchclamp_gui package (a few hundred KB)
 #   full build    = whole app, for every major version x.y.0, when force_full is set,
 #                   or when packaging/min_base.txt names this version (libraries changed)
-# Versions x.y.1 ... x.y.10 are small versions (update channel only). The next
-# version after x.y.10 is the major version x.(y+1).0, which is also a normal GitHub
+# Versions x.y.1 ... x.y.20 are small versions (update channel only). The next
+# version after x.y.20 is the major version x.(y+1).0, which is also a normal GitHub
 # Release with installers, for new users.
 on:
   workflow_dispatch:
