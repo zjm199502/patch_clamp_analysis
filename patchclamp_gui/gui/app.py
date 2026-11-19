@@ -1,8 +1,9 @@
 import os
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication
 
 
@@ -11,6 +12,8 @@ def main():
 
     pg.setConfigOptions(antialias=False, background="w", foreground="k")
     app = QApplication(sys.argv)
+    app.setApplicationDisplayName("膜迹 ClampTrace")
+    app.setWindowIcon(QIcon(str(Path(__file__).resolve().parents[1] / "clamptrace.png")))
     # Fusion + 浅色调色板：在所有电脑上外观一致，避免 Windows 深色模式下文字看不清
     app.setStyle("Fusion")
     app.setPalette(app.style().standardPalette())

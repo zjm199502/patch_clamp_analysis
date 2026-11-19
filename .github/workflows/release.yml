@@ -76,6 +76,8 @@ jobs:
       - name: Build
         run: >
           pyinstaller --noconfirm --clean --windowed --name PatchClampAnalysis
+          --icon packaging/clamptrace.ico --collect-data patchclamp_gui
+          --hidden-import matplotlib.backends.backend_pdf --hidden-import matplotlib.backends.backend_svg
           --add-data "base_version.txt:."
           --collect-submodules patchclamp_gui
           --collect-submodules pyqtgraph --collect-data pyqtgraph
@@ -86,8 +88,23 @@ jobs:
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path dist\PatchClampAnalysis -DestinationPath PatchClampAnalysis-Windows.zip
+      - name: Build and verify Windows installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\clamptrace.iss
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $dir = Join-Path $env:RUNNER_TEMP 'ClampTrace-install-test'
+          $setup = Start-Process .\ClampTrace-Windows-Setup.exe -ArgumentList '/VERYSILENT', '/NORESTART', "/DIR=`"$dir`"" -Wait -PassThru -WindowStyle Hidden
+          if ($setup.ExitCode -ne 0 -or !(Test-Path "$dir\PatchClampAnalysis.exe")) { throw 'Installation failed' }
+          $uninstall = Start-Process "$dir\unins000.exe" -ArgumentList '/VERYSILENT', '/NORESTART' -Wait -PassThru -WindowStyle Hidden
+          if ($uninstall.ExitCode -ne 0 -or (Test-Path "$dir\PatchClampAnalysis.exe")) { throw 'Uninstall failed' }
       - uses: actions/upload-artifact@v4
-        with: {name: windows, path: PatchClampAnalysis-Windows.zip, retention-days: 30}
+        with:
+          name: windows
+          path: |
+            PatchClampAnalysis-Windows.zip
+            ClampTrace-Windows-Setup.exe
+          retention-days: 30
 
   macos:
     needs: test
@@ -103,6 +120,8 @@ jobs:
         run: |
           pyinstaller --noconfirm --clean --windowed --name PatchClampAnalysis \
             --osx-bundle-identifier org.patchclamp.analysis \
+            --icon packaging/clamptrace.icns --collect-data patchclamp_gui \
+            --hidden-import matplotlib.backends.backend_pdf --hidden-import matplotlib.backends.backend_svg \
             --add-data "base_version.txt:." \
             --collect-submodules patchclamp_gui \
             --collect-submodules pyqtgraph --collect-data pyqtgraph \

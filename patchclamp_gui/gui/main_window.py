@@ -125,7 +125,7 @@ class FigurePanel(QtWidgets.QWidget):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"膜片钳分析 PatchClampAnalysis v{__version__} — m/sEPSC · m/sIPSC")
+        self.setWindowTitle(f"膜迹 ClampTrace v{__version__} — m/sEPSC · m/sIPSC")
         screen = self.screen().availableGeometry()
         self.resize(min(1500, screen.width()), min(900, screen.height()))
         self.project = Project()
@@ -519,7 +519,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_cells(); self.refresh_trace(); self.refresh_events()
         if project.cells:
             self.cell_table.selectRow(0)
-        self.setWindowTitle(f"{root.name} — PatchClampAnalysis v{__version__}")
+        self.setWindowTitle(f"{root.name} — 膜迹 ClampTrace v{__version__}")
         self.statusBar().showMessage(f"项目：{root} ｜ Ctrl/Shift 多选记录；Ctrl+S 保存项目")
         return True
 

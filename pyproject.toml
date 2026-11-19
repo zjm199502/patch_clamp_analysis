@@ -35,6 +35,9 @@ version = { attr = "patchclamp_gui.__version__" }
 [tool.setuptools.packages.find]
 include = ["patchclamp_gui*"]
 
+[tool.setuptools.package-data]
+patchclamp_gui = ["clamptrace.png"]
+
 [tool.ruff]
 line-length = 130
 [tool.ruff.lint]

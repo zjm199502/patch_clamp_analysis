@@ -128,6 +128,9 @@ def check_latest(timeout: float = 8.0) -> Release | None:
     if base and patch.get("url") and patching.parse_version(base) >= patching.parse_version(min_base):
         return Release(ver, notes, page, patch["url"], int(patch.get("size", 0)), "patch", min_base)
     full = (m.get("full") or {}).get(asset_name() or "", {})
+    root = install_root()
+    if sys.platform == "win32" and root and any(root.glob("unins*.exe")):
+        return Release(ver, notes, page, None, 0, "page", min_base)
     if full.get("url") and is_newer(str(m.get("full_version", ver)), base or "0"):
         return Release(ver, notes, page, full["url"], int(full.get("size", 0)), "full", min_base)
     return Release(ver, notes, page, None, 0, "page", min_base)

@@ -1,4 +1,6 @@
-# 膜片钳分析 PatchClampAnalysis
+# 膜迹 ClampTrace（原 PatchClampAnalysis）
+
+Windows 用户请从正式 Release 下载 **ClampTrace-Windows-Setup.exe**，运行安装后从开始菜单启动。无需另装 Python，也不必保留下载文件。请在文档目录等程序安装目录以外的位置创建实验项目。
 
 分析膜片钳全细胞记录中 m/sEPSC、m/sIPSC 的图形界面软件，中文界面。
 直接读取 Axon `.abf` 文件，用 [miniML](https://github.com/delvendahl/miniML) 深度学习模型检测事件，

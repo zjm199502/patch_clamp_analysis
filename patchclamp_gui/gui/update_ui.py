@@ -172,7 +172,7 @@ class UpdateManager(QObject):
         base = patching.base_version()
         build = f"（安装包 v{base}，已通过软件内更新升级）" if base and base != __version__ else ""
         QMessageBox.about(self.win, "关于",
-                          f"膜片钳分析 PatchClampAnalysis v{__version__}{build}\n\n"
+                          f"膜迹 ClampTrace v{__version__}{build}\n\n"
                           "m/sEPSC 与 m/sIPSC 的检测、质控、动力学聚类、去卷积与统计分析。\n"
                           "事件检测使用 miniML（O'Neill et al., 2025, eLife 13:RP98485）。\n\n"
                           f"源代码与更新：https://github.com/{updater.REPO}")

@@ -10,6 +10,8 @@ python -m pip install --upgrade pip
 python -m pip install . pyinstaller || goto :error
 python -c "import patchclamp_gui; open('base_version.txt','w').write(patchclamp_gui.__version__)" || goto :error
 pyinstaller --noconfirm --clean --windowed --name PatchClampAnalysis ^
+  --icon packaging/clamptrace.ico --collect-data patchclamp_gui ^
+  --hidden-import matplotlib.backends.backend_pdf --hidden-import matplotlib.backends.backend_svg ^
   --add-data "base_version.txt:." --collect-submodules patchclamp_gui ^
   --collect-submodules pyqtgraph --collect-data pyqtgraph ^
   --collect-submodules miniml --collect-data miniml ^
@@ -18,7 +20,10 @@ pyinstaller --noconfirm --clean --windowed --name PatchClampAnalysis ^
   --exclude-module tkinter ^
   packaging\launcher.py || goto :error
 echo.
-echo 打包完成：dist\PatchClampAnalysis\PatchClampAnalysis.exe
+set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
+if not exist "%ISCC%" set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
+"%ISCC%" packaging\clamptrace.iss || goto :error
+echo 打包完成：ClampTrace-Windows-Setup.exe
 goto :eof
 :error
 echo 打包失败，请把上面的报错信息发给维护者。
