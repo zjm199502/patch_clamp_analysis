@@ -28,6 +28,13 @@ def main():
     w.show()
     paths = [p for p in sys.argv[1:] if os.path.exists(p)]
     if paths:
-        w.add_files(paths)
+        from ..core.project_files import SNAPSHOT
+        if os.path.isdir(paths[0]) or os.path.basename(paths[0]) == SNAPSHOT:
+            target = paths.pop(0)
+            w.activate_project(target if os.path.isdir(target) else os.path.dirname(os.path.abspath(target)))
+        else:
+            w.new_project()
+        if w.project_root:
+            w.add_files(paths)
     QTimer.singleShot(3000, w.updates.maybe_check_on_start)
     sys.exit(app.exec())

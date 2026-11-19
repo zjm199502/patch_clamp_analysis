@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import traceback
+from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
@@ -10,9 +11,9 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from .. import __version__, io
-from ..core import clustering, deconv, detection, plots
+from ..core import clustering, deconv, detection, plots, project_files
 from ..core.features import FEATURES
-from ..core.session import CellSession, Project
+from ..core.session import DEFAULT_PARAMS, CellSession, Project
 from .update_ui import UpdateManager
 
 Qt = QtCore.Qt
@@ -69,6 +70,7 @@ class FigurePanel(QtWidgets.QWidget):
         super().__init__(parent)
         self.fig = None
         self.canvas = None
+        self.export_folder = Path.cwd()
         lay = QtWidgets.QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0)
         self.split = QtWidgets.QSplitter(Qt.Vertical)
         self.holder = QtWidgets.QWidget(); self.hl = QtWidgets.QVBoxLayout(self.holder)
@@ -109,7 +111,7 @@ class FigurePanel(QtWidgets.QWidget):
         if self.fig is None:
             return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "导出图", "figure.pdf", "PDF (*.pdf);;SVG (*.svg);;PNG 600 dpi (*.png);;TIFF 600 dpi (*.tiff)")
+            self, "导出图", str(self.export_folder / "figure.png"), "PNG 600 dpi (*.png);;PDF (*.pdf);;SVG (*.svg);;TIFF 600 dpi (*.tiff)")
         if path:
             dpi, orig = self.fig.dpi, getattr(self.fig, "_original_dpi", self.fig.dpi)
             size = self.fig.get_size_inches().copy()
@@ -124,8 +126,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"膜片钳分析 PatchClampAnalysis v{__version__} — m/sEPSC · m/sIPSC")
-        self.resize(1500, 900)
+        screen = self.screen().availableGeometry()
+        self.resize(min(1500, screen.width()), min(900, screen.height()))
         self.project = Project()
+        self.project_root = None
+        self.project_lock = None
+        self.dirty = False
+        self.project_actions = []
         self.current: CellSession | None = None
         self.workers: list[Worker] = []
         self.deconv_res = None
@@ -134,11 +141,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings = QtCore.QSettings("PatchClampAnalysis", "PatchClampAnalysis")
         self._build_menu()
         self._build_ui()
-        self.statusBar().showMessage("打开 ABF 文件开始，或用 文件 → 载入模拟演示数据 体验完整流程。")
+        self.set_ui_points(int(self.settings.value("ui/points", 10)))
+        self.workspace.setCurrentIndex(0)
+        self.cell_dock.hide()
+        self.statusBar().showMessage("请先新建项目文件夹，或打开已有项目。")
 
     # ================================================================ 界面
     def _build_menu(self):
         m = self.menuBar().addMenu("文件")
+        m.addAction("新建项目文件夹…", self.new_project, "Ctrl+N")
+        m.addAction("打开已有项目…", self.choose_project, "Ctrl+Shift+O")
+        self.project_actions.append(m.addAction("保存项目", self.save_session, "Ctrl+S"))
+        self.project_actions.append(m.addAction("打开项目结果文件夹", self.show_results_folder))
+        m.addSeparator()
         for text, fn, key in (("打开记录（ABF / H5）…", self.open_files, "Ctrl+O"), ("载入模拟演示数据", self.load_demo, None),
                               (None, None, None), ("导出结果表（事件 + 细胞汇总 CSV）…", self.export_tables, "Ctrl+E"),
                               (None, None, None), ("退出", self.close, None)):
@@ -148,18 +163,28 @@ class MainWindow(QtWidgets.QMainWindow):
             if key:
                 act.setShortcut(key)
             m.addAction(act)
+            if fn != self.close:
+                self.project_actions.append(act)
+        for action in self.project_actions:
+            action.setEnabled(False)
+        view = self.menuBar().addMenu("视图")
+        view.addAction("放大界面文字", lambda: self.set_ui_points(self.font().pointSize() + 1), "Ctrl+=")
+        view.addAction("缩小界面文字", lambda: self.set_ui_points(self.font().pointSize() - 1), "Ctrl+-")
+        view.addAction("恢复默认字号", lambda: self.set_ui_points(10), "Ctrl+0")
         self.updates = UpdateManager(self)      # “帮助”菜单：检查更新 / 自动检查 / 关于
 
     def _build_ui(self):
         # ---- 左侧：文件/细胞列表 ----
         dock = QtWidgets.QDockWidget("细胞列表（可直接编辑组别与动物编号）", self)
+        self.cell_dock = dock
         dock.setFeatures(QtWidgets.QDockWidget.NoDockWidgetFeatures)
         w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
         self.cell_table = QtWidgets.QTableWidget(0, 5)
         self.cell_table.setHorizontalHeaderLabels(["文件", "组别", "动物", "事件数", "频率 Hz"])
         self.cell_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
         self.cell_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.cell_table.itemSelectionChanged.connect(self.on_cell_selected)
+        self.cell_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.cell_table.currentCellChanged.connect(self.on_cell_selected)
         self.cell_table.itemChanged.connect(self.on_cell_edited)
         v.addWidget(self.cell_table)
         row = QtWidgets.QHBoxLayout()
@@ -175,7 +200,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resizeDocks([dock], [430], Qt.Horizontal)
 
         self.tabs = QtWidgets.QTabWidget()
-        self.setCentralWidget(self.tabs)
+        self.workspace = QtWidgets.QStackedWidget()
+        self.setCentralWidget(self.workspace)
+        welcome = QtWidgets.QWidget(); layout = QtWidgets.QVBoxLayout(welcome)
+        layout.addStretch(); layout.addWidget(QtWidgets.QLabel("先选择项目，再导入记录。原始文件和分析结果将保存在项目文件夹中。"), 0, Qt.AlignCenter)
+        for label, callback in (("新建项目文件夹…", self.new_project), ("打开已有项目…", self.choose_project)):
+            button = QtWidgets.QPushButton(label); button.clicked.connect(callback); layout.addWidget(button, 0, Qt.AlignCenter)
+        layout.addStretch(); self.workspace.addWidget(welcome); self.workspace.addWidget(self.tabs)
         self.tabs.addTab(self._tab_detect(), "① 记录与检测")
         self.tabs.addTab(self._tab_events(), "② 事件审核")
         self.tabs.addTab(self._tab_deconv(), "③ 去卷积平滑")
@@ -185,7 +216,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().addPermanentWidget(self.progress)
 
     def _tab_detect(self):
-        w = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(w)
         form_w = QtWidgets.QWidget(); form = QtWidgets.QFormLayout(form_w)
         form.setRowWrapPolicy(QtWidgets.QFormLayout.WrapLongRows)
         self.p = {}
@@ -198,9 +228,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.p["tau_rise_ms"] = _spin(0.4, 0.02, 50, 0.1, 2, "ms"); form.addRow("模板 τ上升", self.p["tau_rise_ms"])
         self.p["tau_decay_ms"] = _spin(4, 0.1, 500, 1, 2, "ms"); form.addRow("模板 τ衰减", self.p["tau_decay_ms"])
         form.addRow(QtWidgets.QLabel("<b>预处理</b>"))
-        self.p["lowpass_hz"] = _spin(2000, 0, 20000, 100, 0, "Hz"); form.addRow("低通（0=关）", self.p["lowpass_hz"])
+        self.p["lowpass_hz"] = _spin(DEFAULT_PARAMS["lowpass_hz"], 0, 20000, 100, 0, "Hz"); form.addRow("低通（0=关）", self.p["lowpass_hz"])
         self.p["highpass_hz"] = _spin(0, 0, 100, 0.5, 1, "Hz"); form.addRow("高通（0=关）", self.p["highpass_hz"])
-        self.p["notch_hz"] = _spin(0, 0, 60, 50, 0, "Hz"); form.addRow("工频陷波（0/50/60）", self.p["notch_hz"])
+        self.p["notch_hz"] = _spin(DEFAULT_PARAMS["notch_hz"], 0, 60, 1, 0, "Hz"); form.addRow("工频陷波（0/50/60）", self.p["notch_hz"])
         self.p["detrend_s"] = _spin(1, 0, 30, 0.5, 1, "s"); form.addRow("基线去漂移窗口（0=关）", self.p["detrend_s"])
         form.addRow(QtWidgets.QLabel("<b>检测</b>"))
         self.p["detector"] = QtWidgets.QComboBox(); self.p["detector"].addItems(["miniML", "去卷积"])
@@ -218,15 +248,13 @@ class MainWindow(QtWidgets.QMainWindow):
             lab = QtWidgets.QLabel("未检测到 miniML/TensorFlow，暂用去卷积检测器。\n安装：pip install miniml-detect（Python 3.11）")
             lab.setStyleSheet("color:#b00"); lab.setWordWrap(True); lab.setToolTip(why); form.addRow(lab)
         for label, fn in (("预览预处理", self.run_preprocess), ("检测当前细胞", self.run_detect_current),
-                          ("批量检测全部细胞", self.run_detect_all)):
+                          ("应用当前参数到选中记录", self.apply_selected), ("按各自参数检测选中记录", self.run_detect_selected),
+                          ("按各自参数检测全部细胞", self.run_detect_all)):
             b = QtWidgets.QPushButton(label); b.clicked.connect(fn); form.addRow(b)
         for label, action in (("清除当前细胞预处理及检测", "preprocess"), ("清除当前细胞检测", "detect"),
                               ("清除全部细胞检测…", "batch")):
             form.addRow(self.clear_button(label, action))
         self.info = QtWidgets.QLabel(""); self.info.setWordWrap(True); form.addRow(self.info)
-        scroll = QtWidgets.QScrollArea(); scroll.setWidget(form_w); scroll.setWidgetResizable(True)
-        scroll.setFixedWidth(330)
-        h.addWidget(scroll)
 
         self.glw = pg.GraphicsLayoutWidget()
         self.p_trace = self.glw.addPlot(row=0, col=0); self.p_trace.setLabel("left", "电流", units="A")
@@ -241,8 +269,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.p_trace.addItem(self.c_events)
         self.c_det = self.p_det.plot(pen=pg.mkPen("#4C72B0"))
         self.thr_line = pg.InfiniteLine(angle=0, pen=pg.mkPen("#C44E52", style=Qt.DashLine)); self.p_det.addItem(self.thr_line)
-        h.addWidget(self.glw, 1)
-        return w
+        return self.split_controls(form_w, self.glw)
 
     def _tab_events(self):
         w = QtWidgets.QSplitter(Qt.Horizontal)
@@ -268,8 +295,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return w
 
     def _tab_deconv(self):
-        w = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(w)
-        fw = QtWidgets.QWidget(); form = QtWidgets.QFormLayout(fw); fw.setFixedWidth(330)
+        fw = QtWidgets.QWidget(); form = QtWidgets.QFormLayout(fw)
+        form.setRowWrapPolicy(QtWidgets.QFormLayout.WrapLongRows)
         self.d = {"tau_rise": _spin(0.4, 0.02, 50, 0.1, 2, "ms"), "tau_decay": _spin(4, 0.1, 500, 1, 2, "ms"),
                   "smooth": _spin(0.5, 0, 20, 0.1, 2, "ms"), "thr": _spin(4, 1, 20, 0.5, 1, "SD"),
                   "hp": _spin(1, 0, 20, 0.5, 1, "Hz"), "rate": _spin(1.0, 0.05, 30, 0.5, 2, "s")}
@@ -287,7 +314,6 @@ class MainWindow(QtWidgets.QMainWindow):
         tip.setWordWrap(True); tip.setStyleSheet("color:#555"); form.addRow(tip)
         self.deconv_info = QtWidgets.QLabel(""); self.deconv_info.setWordWrap(True); form.addRow(self.deconv_info)
         form.addRow(self.clear_button("清除去卷积结果", "deconv"))
-        h.addWidget(fw)
         g = pg.GraphicsLayoutWidget()
         self.pd1 = g.addPlot(row=0, col=0, title="原始记录（灰）与去噪重建（红）")
         self.pd2 = g.addPlot(row=1, col=0, title="去卷积曲线与阈值")
@@ -300,12 +326,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cd_thr = pg.InfiniteLine(angle=0, pen=pg.mkPen("#C44E52", style=Qt.DashLine)); self.pd2.addItem(self.cd_thr)
         self.cd_pk = pg.ScatterPlotItem(size=6, brush=pg.mkBrush("#C44E52"), pen=None); self.pd2.addItem(self.cd_pk)
         self.cd_rate = self.pd3.plot(pen=pg.mkPen("#55A868", width=1.5))
-        h.addWidget(g, 1)
-        return w
+        return self.split_controls(fw, g)
 
     def _tab_cluster(self):
-        w = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(w)
-        fw = QtWidgets.QWidget(); form = QtWidgets.QFormLayout(fw); fw.setFixedWidth(330)
+        fw = QtWidgets.QWidget(); form = QtWidgets.QFormLayout(fw)
+        form.setRowWrapPolicy(QtWidgets.QFormLayout.WrapLongRows)
         self.c = {}
         self.c["scope"] = QtWidgets.QComboBox(); self.c["scope"].addItems(["当前细胞", "全部细胞合并"])
         self.c["rep"] = QtWidgets.QComboBox(); self.c["rep"].addItems(["波形形状（峰值归一化 + PCA）", "标量特征"])
@@ -324,9 +349,22 @@ class MainWindow(QtWidgets.QMainWindow):
         b = QtWidgets.QPushButton("运行聚类"); b.clicked.connect(self.run_cluster); form.addRow(b)
         form.addRow(self.clear_button("清除所选范围的聚类", "cluster"))
         self.cluster_msg = QtWidgets.QLabel(""); self.cluster_msg.setWordWrap(True); form.addRow(self.cluster_msg)
-        h.addWidget(fw)
-        self.cluster_panel = FigurePanel(); h.addWidget(self.cluster_panel, 1)
-        return w
+        self.cluster_panel = FigurePanel()
+        return self.split_controls(fw, self.cluster_panel)
+
+    def split_controls(self, form, plot):
+        scroll = QtWidgets.QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(form)
+        splitter = QtWidgets.QSplitter(Qt.Horizontal); splitter.setChildrenCollapsible(False)
+        splitter.addWidget(scroll); splitter.addWidget(plot)
+        splitter.setStretchFactor(1, 1); splitter.setSizes([350, 850])
+        return splitter
+
+    def set_ui_points(self, points):
+        points = max(7, min(20, points))
+        font = self.font(); font.setPointSize(points); self.setFont(font)
+        for panel in (self.cluster_panel, self.an_panel):
+            mono = panel.text.font(); mono.setPointSize(points); panel.text.setFont(mono)
+        self.settings.setValue("ui/points", points)
 
     ANALYSES = ["细胞总览", "检测质控（注入 / 反极性 / 阈值扫描）", "上升时间–幅度相关（树突滤波诊断）",
                 "事件时间依赖性（自相关 / Hawkes）", "峰值缩放非平稳噪声分析（PS-NSFA）", "量子多峰分析",
@@ -335,7 +373,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _tab_analysis(self):
         w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
-        row = QtWidgets.QHBoxLayout()
+        controls = QtWidgets.QWidget()
         self.an = QtWidgets.QComboBox(); self.an.addItems(self.ANALYSES)
         self.an_metric = QtWidgets.QComboBox()
         self.an_metric.addItems(["frequency"] + [f"{f}_{s}" for f in FEATURES for s in ("median", "mean")]
@@ -372,8 +410,11 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.setColumnStretch(1, 3); grid.setColumnStretch(3, 2)
         for cb in (self.an, self.an_metric, self.an_cdf, self.an_other, self.an_df):
             cb.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-        row.addLayout(grid)
-        v.addLayout(row)
+        controls.setLayout(grid)
+        scroll = QtWidgets.QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(controls)
+        scroll.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustToContents)
+        scroll.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Maximum)
+        v.addWidget(scroll)
         self.an_panel = FigurePanel(); v.addWidget(self.an_panel, 1)
         return w
 
@@ -425,11 +466,92 @@ class MainWindow(QtWidgets.QMainWindow):
             self.an_panel.clear_result()
             if action != "analysis":
                 self.cluster_panel.clear_result(); self.cluster_msg.clear()
-                self.refresh_cells_keep(); self.refresh_trace(); self.refresh_events()
+                self.refresh_cells(); self.refresh_trace(); self.refresh_events()
+        self.dirty = True
         self.statusBar().showMessage("已清除；可调整参数后重新运行。")
+
+    def new_project(self):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "输入新项目文件夹名称（必须尚不存在）", "", "所有名称 (*)",
+                                                        options=QtWidgets.QFileDialog.DontConfirmOverwrite)
+        if path:
+            self.activate_project(path, create=True)
+
+    def choose_project(self):
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择包含 project.pca.h5 的项目文件夹")
+        if folder:
+            self.activate_project(folder)
+
+    def activate_project(self, path, create=False):
+        if self.workers or (self.dirty and not self.save_session()):
+            return False
+        root = Path(path).resolve()
+        lock = self.project_lock if root == self.project_root else None
+        try:
+            if create:
+                project = project_files.create_project(root)
+            if not root.is_dir():
+                raise ValueError("项目文件夹不存在")
+            if lock is None:
+                lock = QtCore.QLockFile(str(root / ".patchclamp.lock")); lock.setStaleLockTime(0)
+                if not lock.tryLock(0):
+                    raise ValueError("无法锁定项目：请确认文件夹可写，且没有其他窗口正在使用此项目。")
+            if not create:
+                project = project_files.open_project(root)
+        except Exception as error:
+            if lock is not None and lock is not self.project_lock and lock.isLocked():
+                lock.unlock()
+            QtWidgets.QMessageBox.warning(self, "无法新建或打开项目", str(error)); return False
+        if self.project_lock is not None and lock is not self.project_lock:
+            self.project_lock.unlock()
+        self.project_lock = lock
+        self.project, self.project_root, self.current = project, root, None
+        for panel in (self.cluster_panel, self.an_panel):
+            panel.export_folder = root / "results"
+        self.dirty = False; self.qc_result_cell = None
+        self.workspace.setCurrentIndex(1); self.cell_dock.show(); self.tabs.setCurrentIndex(0)
+        for action in self.project_actions:
+            action.setEnabled(True)
+        self.cell_table.clearSelection(); self.cell_table.setCurrentCell(-1, -1)
+        self.clear_deconv_view(); self.cluster_panel.clear_result(); self.an_panel.clear_result(); self.cluster_msg.clear()
+        self.write_params(DEFAULT_PARAMS)
+        if not self.miniml_ok:
+            self.p["detector"].setCurrentText("去卷积")
+        self.refresh_cells(); self.refresh_trace(); self.refresh_events()
+        if project.cells:
+            self.cell_table.selectRow(0)
+        self.setWindowTitle(f"{root.name} — PatchClampAnalysis v{__version__}")
+        self.statusBar().showMessage(f"项目：{root} ｜ Ctrl/Shift 多选记录；Ctrl+S 保存项目")
+        return True
+
+    def save_session(self):
+        if self.project_root is None or self.workers:
+            return False
+        try:
+            project_files.save_project(self.project_root, self.project)
+        except Exception as error:
+            QtWidgets.QMessageBox.warning(self, "项目保存失败", str(error)); return False
+        self.dirty = False
+        self.statusBar().showMessage(f"已保存项目：{self.project_root}")
+        return True
+
+    def show_results_folder(self):
+        if self.project_root:
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(self.project_root / "results")))
+
+    def archive_result(self, fig, text, details, cells, arrays=None):
+        try:
+            details.update(version=__version__, records=[dict(name=cell.name, group=cell.group, animal=cell.animal,
+                params=cell.params, channel=cell.rec.channel, fs=cell.rec.fs, valid_events=int(cell.mask().sum()),
+                raw=Path(cell.rec.path).relative_to(self.project_root).as_posix() if cell.rec.path else None) for cell in cells])
+            folder = project_files.archive_result(self.project_root, fig, text, details, arrays)
+            self.statusBar().showMessage(f"分析结果已保存：{folder}")
+        except Exception as error:
+            QtWidgets.QMessageBox.warning(self, "分析已完成，但结果未保存", str(error))
 
     # ================================================================ 细胞管理
     def open_files(self):
+        if self.project_root is None or self.workers:
+            return
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "打开记录", self.settings.value("last_dir", ""),
                                                           "记录文件 (*.abf *.h5 *.hdf5 *.npy);;所有文件 (*)")
         if paths:
@@ -437,6 +559,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.add_files(paths)
 
     def add_files(self, paths):
+        if self.project_root is None or self.workers:
+            return
         for p in paths:
             try:
                 ch = 0
@@ -448,17 +572,30 @@ class MainWindow(QtWidgets.QMainWindow):
                         if not ok:
                             continue
                         ch = inf["channels"][items.index(it)]
-                self.add_cell(CellSession(io.load_any(p, channel=ch)))
+                record = io.load_any(p, channel=ch)
+                record.path = str(project_files.copy_raw(self.project_root, p))
+                self.add_cell(CellSession(record))
             except Exception as e:
                 QtWidgets.QMessageBox.warning(self, "读取失败", f"{p}\n{e}")
 
     def add_cell(self, cell: CellSession):
-        cell.params.update(self.read_params())
+        if self.project_root is None:
+            return
+        self.dirty = True
+        if not self.miniml_ok and cell.params["detector"] == "miniML":
+            cell.params["detector"] = "deconvolution"
+        names = {entry.name for entry in self.project.cells}
+        original = cell.name
+        suffix = 1
+        while cell.name in names:
+            suffix += 1; cell.rec.name = f"{original} ({suffix})"
         self.project.cells.append(cell)
         self.refresh_cells()
         self.cell_table.selectRow(len(self.project.cells) - 1)
 
     def load_demo(self):
+        if self.project_root is None or self.workers:
+            return
         pops_c = [dict(frac=0.6, amp=18, amp_cv=0.35, tau_rise=0.3, tau_decay=3.0),
                   dict(frac=0.4, amp=10, amp_cv=0.30, tau_rise=1.2, tau_decay=9.0)]
         pops_t = [dict(frac=0.6, amp=25, amp_cv=0.35, tau_rise=0.3, tau_decay=3.0),
@@ -469,20 +606,25 @@ class MainWindow(QtWidgets.QMainWindow):
                                         seed=100 + i, name=f"demo_{'TTX48h' if treated else 'ctrl'}_{i % 4 + 1}")
             c = CellSession(rec, group="TTX 48h" if treated else "Control", animal=f"M{i // 2 + 1}")
             self.add_cell(c)
-        self.statusBar().showMessage("已载入 8 个模拟细胞（对照 4 个、处理 4 个；处理组幅度乘性放大 1.4 倍）。点击“批量检测全部细胞”。")
+        self.statusBar().showMessage("已载入 8 个模拟细胞。可多选记录应用参数，再按各自参数检测。")
 
     def remove_cell(self):
         r = self.cell_table.currentRow()
         if 0 <= r < len(self.project.cells):
+            self.dirty = True
             del self.project.cells[r]
             self.current = None
             self.refresh_cells()
+            if self.project.cells:
+                self.cell_table.selectRow(min(r, len(self.project.cells) - 1)); self.on_cell_selected()
+            else:
+                self.refresh_trace(); self.refresh_events(); self.clear_deconv_view()
 
     def refresh_cells(self):
         self.cell_table.blockSignals(True)
         self.cell_table.setRowCount(len(self.project.cells))
         for i, c in enumerate(self.project.cells):
-            n = len(c.valid()[0]) if c.events is not None else None
+            n = int(c.mask().sum()) if c.events is not None else None
             vals = [c.name, c.group, c.animal, "" if n is None else str(n),
                     "" if n is None else f"{n / c.rec.duration:.2f}"]
             for j, val in enumerate(vals):
@@ -495,6 +637,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.an_other.clear(); self.an_other.addItems([c.name for c in self.project.cells]); self.an_other.setCurrentText(cur)
 
     def on_cell_edited(self, it):
+        self.dirty = True
         c = self.project.cells[it.row()]
         if it.column() == 1:
             c.group = it.text().strip()
@@ -538,16 +681,29 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ================================================================ 后台任务
     def run_bg(self, fn, on_done, msg):
+        if self.workers or self.project_root is None:
+            return
+        self.dirty = True
+        self.tabs.setEnabled(False); self.cell_dock.setEnabled(False)
+        for action in self.project_actions:
+            action.setEnabled(False)
+        self.last_error = None
         self.statusBar().showMessage(msg)
         self.progress.setRange(0, 0); self.progress.show()
         wk = Worker(fn, self)
         self.workers.append(wk)
 
+        def unlock():
+            self.progress.hide(); self.workers.remove(wk)
+            self.tabs.setEnabled(True); self.cell_dock.setEnabled(True)
+            for action in self.project_actions:
+                action.setEnabled(True)
+
         def finish(res):
-            self.progress.hide(); self.workers.remove(wk); on_done(res)
+            unlock(); on_done(res)
 
         def fail(tb):
-            self.progress.hide(); self.workers.remove(wk)
+            unlock()
             self.statusBar().showMessage("出错")
             self.last_error = tb
             if os.environ.get("PATCHCLAMP_NO_DIALOGS"):      # 自动测试时不弹模态框
@@ -566,6 +722,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         c.params.update(self.read_params())
         c.run_preprocess()
+        self.dirty = True
         self.refresh_trace()
         self.statusBar().showMessage(f"预处理完成，噪声 RMS ≈ {c.qc['noise_rms']:.2f} {c.rec.unit}")
 
@@ -582,15 +739,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self.run_bg(job, lambda n: self._detected(f"{c.name}：检出 {n} 个事件"), f"正在检测 {c.name} …")
 
     def run_detect_all(self):
+        self.detect_batch(list(self.project.cells))
+
+    def selected_cells(self):
+        return [self.project.cells[index.row()] for index in self.cell_table.selectionModel().selectedRows()]
+
+    def apply_selected(self):
         params = self.read_params()
-        cells = list(self.project.cells)
+        cells = [cell for cell in self.selected_cells() if any(cell.params[key] != value for key, value in params.items())]
         if not cells:
+            self.statusBar().showMessage("未选中记录，或所选记录已使用这些参数。")
+            return
+        if any(cell.processed is not None for cell in cells):
+            if QtWidgets.QMessageBox.question(self, "应用参数", f"参数变更将清除 {len(cells)} 条记录的旧预处理和检测结果。继续吗？",
+                                              QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
+                return
+        for cell in cells:
+            cell.clear_detection(preprocessing=True); cell.params.update(params)
+        self.dirty = True; self.clear_deconv_view(); self.cluster_panel.clear_result(); self.cluster_msg.clear()
+        self.an_panel.clear_result(); self.qc_result_cell = None
+        self.refresh_cells(); self.refresh_trace(); self.refresh_events()
+        self.statusBar().showMessage(f"已向 {len(cells)} 条选中记录应用参数；可开始检测。")
+
+    def run_detect_selected(self):
+        self.detect_batch(self.selected_cells())
+
+    def detect_batch(self, cells):
+        if not cells:
+            self.statusBar().showMessage("请先选择要检测的记录。")
             return
 
         def job():
             tot = 0
             for c in cells:
-                c.params.update(params)
                 c.run_preprocess()
                 tot += c.run_detection()
             return tot
@@ -600,16 +781,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _detected(self, msg):
         self.statusBar().showMessage(msg)
-        row = self.cell_table.currentRow()
         self.refresh_cells()
-        if row >= 0:
-            self.cell_table.blockSignals(True); self.cell_table.selectRow(row); self.cell_table.blockSignals(False)
         self.refresh_trace()
         self.refresh_events()
 
     def refresh_trace(self, reset=False):
         c = self.current
         if c is None:
+            self.info.clear(); self.thr_line.hide()
+            for curve in (self.c_raw, self.c_proc, self.c_events, self.c_det):
+                curve.setData([], [])
             return
         t = c.rec.time
         scale = 1e-12 if c.rec.unit.lower().startswith("p") else 1.0
@@ -704,13 +885,9 @@ class MainWindow(QtWidgets.QMainWindow):
         col = c.events.columns.get_loc("excluded")
         for r in rows:
             c.events.iat[r, col] = not bool(c.events.iat[r, col])
-        self.refresh_events(); self.refresh_trace(); self.refresh_cells_keep()
+        self.dirty = True
+        self.refresh_events(); self.refresh_trace(); self.refresh_cells()
         self.ev_table.selectRow(min(rows[-1] + 1, len(c.events) - 1))
-
-    def refresh_cells_keep(self):
-        row = self.cell_table.currentRow()
-        self.refresh_cells()
-        self.cell_table.blockSignals(True); self.cell_table.selectRow(row); self.cell_table.blockSignals(False)
 
     # ================================================================ 去卷积
     def fit_template(self):
@@ -754,7 +931,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"检出 {len(res.peaks)} 个事件（{len(res.peaks) / c.rec.duration:.2f} Hz）。\n"
                 f"重建残差 SD = {resid:.2f}（原始记录 SD = {tot:.2f}，噪声 RMS ≈ {c.qc.get('noise_rms', np.nan):.2f}）。"
                 "残差接近噪声水平说明模板与阈值合适。")
-            self.statusBar().showMessage("去卷积完成")
+            self.archive_result(None, self.deconv_info.text(), dict(analysis="去卷积", direction=direction, settings=d,
+                                threshold=res.threshold), [c], {key: getattr(res, key) for key in
+                                ("peaks", "peak_heights", "deconvolved", "reconvolved", "kernel")})
             self.pd1.enableAutoRange(); self.pd2.enableAutoRange(); self.pd3.enableAutoRange()
 
         self.run_bg(job, done, "正在去卷积 …")
@@ -823,7 +1002,12 @@ class MainWindow(QtWidgets.QMainWindow):
                        "· 做“全部细胞合并”聚类后，到“分析与统计 → 各簇组成的组间比较”检验处理是否选择性改变某一类输入。"]
                 self.cluster_panel.show_result(fig, "\n".join(txt))
             self.refresh_trace(); self.refresh_events()
-            self.statusBar().showMessage("聚类完成")
+            if res.k < 1:
+                self.cluster_panel.clear_result()
+            self.archive_result(self.cluster_panel.fig, self.cluster_panel.text.toPlainText() or res.message,
+                                dict(analysis="动力学聚类", pooled=pooled, representation=rep, method=method, k=k,
+                                     embedding=emb, features=feats, exclude_overlap=noov), cells,
+                                {f"labels_{index}": cell.events["cluster"].to_numpy() for index, cell in enumerate(cells)})
 
         self.run_bg(job, done, "正在聚类 …")
 
@@ -860,7 +1044,8 @@ class MainWindow(QtWidgets.QMainWindow):
         def done(out):
             self.qc_result_cell = c if i == 1 else None
             self.an_panel.show_result(*out)
-            self.statusBar().showMessage("分析完成")
+            self.archive_result(*out, dict(analysis=self.ANALYSES[i], current=c.name if c else None, metric=metric,
+                                other=other.name if other else None, driving_force_mv=dfm, cdf_mode=cdf_mode), self.project.cells)
 
         self.run_bg(job, done, f"正在运行：{self.an.currentText()} …")
 
@@ -868,13 +1053,20 @@ class MainWindow(QtWidgets.QMainWindow):
     def export_tables(self):
         if not self.project.analyzed():
             QtWidgets.QMessageBox.information(self, "导出", "还没有检测结果。"); return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出结果表（输入文件名前缀）", "results", "CSV (*.csv)")
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出结果表（输入文件名前缀）", str(self.project_root / "results" / "results"), "CSV (*.csv)")
         if path:
             stem = path[:-4] if path.lower().endswith(".csv") else path
             files = self.project.export(stem)
             self.statusBar().showMessage("已导出：" + "，".join(os.path.basename(f) for f in files))
 
     def closeEvent(self, e):
-        for wk in list(self.workers):
-            wk.wait(3000)
+        if self.workers:
+            self.statusBar().showMessage("请在后台任务结束后关闭。")
+            e.ignore(); return
+        if self.dirty and not self.save_session():
+            if QtWidgets.QMessageBox.question(self, "项目尚未保存", "要放弃未保存的更改并关闭吗？",
+                                              QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
+                e.ignore(); return
+        if self.project_lock is not None:
+            self.project_lock.unlock(); self.project_lock = None
         super().closeEvent(e)

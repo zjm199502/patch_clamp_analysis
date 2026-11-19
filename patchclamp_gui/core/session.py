@@ -11,7 +11,7 @@ from ..io import Recording
 
 DEFAULT_PARAMS = dict(
     direction="negative", window_ms=30.0, tau_rise_ms=0.4, tau_decay_ms=4.0,
-    lowpass_hz=2000.0, highpass_hz=0.0, notch_hz=0.0, detrend_s=1.0,
+    lowpass_hz=1000.0, highpass_hz=0.0, notch_hz=50.0, detrend_s=1.0,
     detector="miniML", model="GC_lstm_model.h5", threshold=0.5,
     deconv_threshold_sd=4.0, deconv_smooth_ms=0.5, min_amplitude=0.0,
 )

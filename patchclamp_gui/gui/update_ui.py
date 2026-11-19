@@ -155,6 +155,8 @@ class UpdateManager(QObject):
                "新版本已下载。软件将关闭并自动重新打开，大约需要半分钟。\n现在更新吗？\n")
         if QMessageBox.question(self.win, "更新", msg + "你的分析结果保存在输出文件夹里，不受影响。") != QMessageBox.Yes:
             return
+        if self.win.workers or (self.win.dirty and not self.win.save_session()):
+            return
         try:
             if small:
                 updater.restart_app()
