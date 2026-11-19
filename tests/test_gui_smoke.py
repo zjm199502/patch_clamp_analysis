@@ -96,6 +96,12 @@ def test_import_subset_and_reopen(tmp_path, monkeypatch):
     window.add_files(paths)
     assert len({cell.name for cell in window.project.cells}) == 3
     table = window.cell_table
+    preset = table.cellWidget(1, 6)
+    preset.setCurrentIndex(3)
+    preset.activated.emit(3)
+    assert window.project.cells[1].params["direction"] == window.p["direction"].currentText() == "positive"
+    assert window.project.cells[0].params["direction"] == "negative"
+    assert window.cell_splitter.handle(1).width() > 0
     table.selectRow(0)
     table.selectionModel().select(table.model().index(2, 0), QtCore.QItemSelectionModel.Select | QtCore.QItemSelectionModel.Rows)
     window.p["lowpass_hz"].setValue(800); window.apply_selected()

@@ -5,6 +5,7 @@ import os
 import csv
 import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,18 @@ from .update_ui import UpdateManager
 
 Qt = QtCore.Qt
 CLUSTER_COLORS = [QtGui.QColor(c) for c in plots.PALETTE]
+
+
+def wait_for_io(pool, fn, *args):
+    future = pool.submit(fn, *args)
+    loop = QtCore.QEventLoop()
+    timer = QtCore.QTimer()
+    timer.timeout.connect(lambda: loop.quit() if future.done() else None)
+    timer.start(40)
+    if not future.done():
+        loop.exec()
+    timer.stop()
+    return future.result()
 
 
 class Worker(QtCore.QThread):
@@ -221,8 +234,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cell_dock = dock
         dock.setFeatures(QtWidgets.QDockWidget.NoDockWidgetFeatures)
         w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
-        self.cell_table = QtWidgets.QTableWidget(0, 6)
-        self.cell_table.setHorizontalHeaderLabels(["文件", "组别", "动物", "事件数", "频率 Hz", "备注"])
+        self.cell_table = QtWidgets.QTableWidget(0, 7)
+        self.cell_table.setHorizontalHeaderLabels(["文件", "组别", "动物", "事件数", "频率 Hz", "备注", "事件类型"])
+        self.cell_table.horizontalHeader().moveSection(6, 1)
+        self.cell_table.setColumnWidth(6, 180)
+        self.cell_table.horizontalHeader().setMinimumSectionSize(60)
         self.cell_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
         self.cell_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.cell_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
@@ -233,22 +249,27 @@ class MainWindow(QtWidgets.QMainWindow):
         for label, fn in (("添加文件", self.open_files), ("添加文件夹", self.open_folder), ("移除", self.remove_cell)):
             b = QtWidgets.QPushButton(label); b.clicked.connect(fn); row.addWidget(b)
         v.addLayout(row)
-        dock.setWidget(w); dock.setMinimumWidth(300)
+        dock.setWidget(w); dock.setMinimumWidth(220)
         hh = self.cell_table.horizontalHeader()
         for j in range(1, 5):
             hh.setSectionResizeMode(j, QtWidgets.QHeaderView.ResizeToContents)
         self.cell_table.verticalHeader().setVisible(False)
-        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
-        self.resizeDocks([dock], [430], Qt.Horizontal)
-
         self.tabs = QtWidgets.QTabWidget()
+        self.cell_splitter = QtWidgets.QSplitter(Qt.Horizontal)
+        self.cell_splitter.setHandleWidth(9)
+        self.cell_splitter.setChildrenCollapsible(False)
+        self.cell_splitter.addWidget(dock)
+        self.cell_splitter.addWidget(self.tabs)
+        self.cell_splitter.setStretchFactor(1, 1)
+        self.cell_splitter.setSizes([430, 850])
+        self.cell_splitter.handle(1).setToolTip("左右拖动调整细胞列表宽度")
         self.workspace = QtWidgets.QStackedWidget()
         self.setCentralWidget(self.workspace)
         welcome = QtWidgets.QWidget(); layout = QtWidgets.QVBoxLayout(welcome)
         layout.addStretch(); layout.addWidget(QtWidgets.QLabel("先选择项目，再导入记录。原始文件和分析结果将保存在项目文件夹中。"), 0, Qt.AlignCenter)
         for label, callback in (("新建项目文件夹…", self.new_project), ("打开已有项目…", self.choose_project)):
             button = QtWidgets.QPushButton(label); button.clicked.connect(callback); layout.addWidget(button, 0, Qt.AlignCenter)
-        layout.addStretch(); self.workspace.addWidget(welcome); self.workspace.addWidget(self.tabs)
+        layout.addStretch(); self.workspace.addWidget(welcome); self.workspace.addWidget(self.cell_splitter)
         self.tabs.addTab(self._tab_detect(), "① 记录与检测")
         self.tabs.addTab(self._tab_events(), "② 事件审核")
         self.tabs.addTab(self._tab_deconv(), "③ 去卷积平滑")
@@ -276,9 +297,6 @@ class MainWindow(QtWidgets.QMainWindow):
         form_w = QtWidgets.QWidget(); form = QtWidgets.QFormLayout(form_w)
         form.setRowWrapPolicy(QtWidgets.QFormLayout.WrapLongRows)
         self.p = {}
-        self.preset = QtWidgets.QComboBox(); self.preset.addItems(list(detection.PRESETS))
-        self.preset.currentTextChanged.connect(self.apply_preset)
-        form.addRow("事件类型预设", self.preset)
         self.p["direction"] = QtWidgets.QComboBox(); self.p["direction"].addItems(["negative", "positive"])
         form.addRow("事件方向", self.p["direction"])
         self.p["window_ms"] = _spin(30, 2, 1000, 5, 1, "ms"); form.addRow("事件窗口", self.p["window_ms"])
@@ -638,7 +656,16 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "递归添加文件夹", self.settings.value("last_dir", ""))
         if folder:
-            groups = {str(path): group for path, group in import_metadata.scan(folder, self.project_root)}
+            scan = QtWidgets.QProgressDialog("正在扫描文件夹及子目录…", "", 0, 0, self)
+            scan.setCancelButton(None)
+            scan.setWindowModality(Qt.WindowModal)
+            scan.show()
+            try:
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    groups = wait_for_io(pool, lambda: {str(path): group for path, group in import_metadata.scan(folder, self.project_root)})
+            finally:
+                scan.close()
+                scan.deleteLater()
             if not groups:
                 self.statusBar().showMessage("文件夹中没有支持的记录")
                 return
@@ -648,24 +675,60 @@ class MainWindow(QtWidgets.QMainWindow):
     def add_files(self, paths, groups=None):
         if self.project_root is None or self.workers:
             return
-        for p in paths:
+        paths = list(map(str, paths))
+        if not paths:
+            return
+        total = len(paths)
+        dialog = QtWidgets.QProgressDialog("准备导入…", "停止后续导入", 0, total, self)
+        dialog.setWindowTitle("导入记录")
+        dialog.setWindowModality(Qt.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setValue(0)
+        dialog.show()
+        imported = 0
+        errors = []
+        pool = ThreadPoolExecutor(max_workers=1)
+
+        for index, p in enumerate(paths):
+            if dialog.wasCanceled():
+                break
+            label = f"{index + 1}/{total} · {Path(p).name}"
+            dialog.setLabelText(f"读取记录：{label}　已成功 {imported} 条")
             try:
                 ch = 0
                 if p.lower().endswith(".abf"):
-                    inf = io.abf_info(p)
+                    inf = wait_for_io(pool, io.abf_info, p)
+                    if dialog.wasCanceled():
+                        break
                     if len(inf["channels"]) > 1:
                         items = [f"{c}: {n} ({u})" for c, n, u in zip(inf["channels"], inf["channel_names"], inf["units"])]
-                        it, ok = QtWidgets.QInputDialog.getItem(self, "选择通道", os.path.basename(p), items, 0, False)
+                        it, ok = QtWidgets.QInputDialog.getItem(dialog, "选择通道", os.path.basename(p), items, 0, False)
                         if not ok:
                             continue
                         ch = inf["channels"][items.index(it)]
-                record = io.load_any(p, channel=ch)
-                record.path = str(project_files.copy_raw(self.project_root, p))
-                self.add_cell(CellSession(record, group=(groups or {}).get(p, "")))
+                record = wait_for_io(pool, io.load_any, p, ch)
+                dialog.setLabelText(f"复制到项目：{label}　已成功 {imported} 条")
+                record.path = str(wait_for_io(pool, project_files.copy_raw, self.project_root, p))
+                self.add_cell(CellSession(record, group=(groups or {}).get(p, "")), refresh=False)
+                imported += 1
             except Exception as e:
-                QtWidgets.QMessageBox.warning(self, "读取失败", f"{p}\n{e}")
+                errors.append(f"{p}：{e}")
+            finally:
+                if not dialog.wasCanceled():
+                    dialog.setValue(index + 1)
+        pool.shutdown()
+        dialog.close()
+        dialog.deleteLater()
+        if imported:
+            self.refresh_cells()
+            self.cell_table.selectRow(len(self.project.cells) - 1)
+        self.statusBar().showMessage(f"导入结束：成功 {imported}/{total} 条，失败 {len(errors)} 条")
+        if errors:
+            QtWidgets.QMessageBox.warning(self, "部分文件读取失败", "\n".join(errors[:10]))
 
-    def add_cell(self, cell: CellSession):
+    def add_cell(self, cell: CellSession, refresh=True):
         if self.project_root is None:
             return
         self.dirty = True
@@ -677,6 +740,8 @@ class MainWindow(QtWidgets.QMainWindow):
         while cell.name in names:
             suffix += 1; cell.rec.name = f"{original} ({suffix})"
         self.project.cells.append(cell)
+        if not refresh:
+            return
         self.refresh_cells()
         self.cell_table.selectRow(len(self.project.cells) - 1)
 
@@ -719,6 +784,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 if j not in (1, 2, 5):
                     it.setFlags(it.flags() & ~Qt.ItemIsEditable)
                 self.cell_table.setItem(i, j, it)
+            combo = self.cell_table.cellWidget(i, 6)
+            if combo is None:
+                combo = QtWidgets.QComboBox()
+                combo.addItems(["自定义", *detection.PRESETS])
+                combo.activated.connect(lambda _, row=i, box=combo: self.apply_preset(row, box.currentText()))
+                self.cell_table.setCellWidget(i, 6, combo)
+            combo.setCurrentText(next((name for name, preset in detection.PRESETS.items()
+                                       if all(c.params[key] == val for key, val in preset.items())), "自定义"))
         self.cell_table.blockSignals(False)
         cur = self.an_other.currentText()
         self.an_other.clear(); self.an_other.addItems([c.name for c in self.project.cells]); self.an_other.setCurrentText(cur)
@@ -744,10 +817,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_events()
 
     # ================================================================ 参数
-    def apply_preset(self, name):
-        for k, val in detection.PRESETS[name].items():
-            wd = self.p[k]
-            wd.setCurrentText(val) if isinstance(wd, QtWidgets.QComboBox) else wd.setValue(val)
+    def apply_preset(self, row, name):
+        cell = self.project.cells[row]
+        preset = detection.PRESETS.get(name)
+        if preset and any(cell.params[key] != value for key, value in preset.items()):
+            if cell.det is not None and QtWidgets.QMessageBox.question(self, "更改事件类型", "更改此记录的事件类型将清除旧检测结果。继续吗？",
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
+                self.refresh_cells()
+                return
+            cell.clear_detection()
+            cell.params.update(preset)
+            self.dirty = True
+        self.cell_table.selectRow(row)
+        self.on_cell_selected()
+        self.refresh_cells()
 
     def read_params(self) -> dict:
         out = {}
