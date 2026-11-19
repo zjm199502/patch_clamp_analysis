@@ -400,6 +400,9 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(self.clear_button("清除审核标记", "review"))
         v.addLayout(row)
         w.addWidget(left)
+        export = QtWidgets.QPushButton("导出全项目审核后统计（CSV）…")
+        export.clicked.connect(self.export_review_summary)
+        v.addWidget(export)
         g = pg.GraphicsLayoutWidget()
         self.p_ev = g.addPlot(row=0, col=0, title="所选事件（原位）"); self.p_ev.setLabel("bottom", "时间", units="s")
         self.c_ev_trace = self.p_ev.plot(pen=pg.mkPen("#222222"))
@@ -480,10 +483,7 @@ class MainWindow(QtWidgets.QMainWindow):
             mono = panel.text.font(); mono.setPointSize(points); panel.text.setFont(mono)
         self.settings.setValue("ui/points", points)
 
-    ANALYSES = ["细胞总览", "检测质控（注入 / 反极性 / 阈值扫描）", "上升时间–幅度相关（树突滤波诊断）",
-                "事件时间依赖性（自相关 / Hawkes）", "峰值缩放非平稳噪声分析（PS-NSFA）", "量子多峰分析",
-                "E/I 联合分析（当前细胞=E，另选一个=I）",
-                "组间比较（层级统计）", "累积概率分布（幅度 / IEI）", "突触缩放（秩序图 / 比例图）", "各簇组成的组间比较"]
+    ANALYSES = ["事件指标组间比较", "累积概率分布（幅度 / IEI）"]
 
     def _tab_analysis(self):
         w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
@@ -491,14 +491,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.an = QtWidgets.QComboBox(); self.an.addItems(self.ANALYSES)
         self.an_metric = QtWidgets.QComboBox()
         self.an_metric.addItems(["frequency"] + [f"{f}_{s}" for f in FEATURES for s in ("median", "mean")]
-                                + ["iei_cv", "avg_event_tau", "noise_rms"])
+                                + ["iei_median"])
         self.an_metric.setCurrentText("amplitude_median")
-        self.an_other = QtWidgets.QComboBox()
+        self.family_choice = QtWidgets.QComboBox()
+        self.family_choice.addItems(["EPSC", "IPSC"])
         self.group_by = QtWidgets.QComboBox()
-        self.group_by.addItems(["组别", "动物"])
-        self.an_other.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.an_other.setMinimumContentsLength(16)
-        self.an_df = _spin(70, 1, 200, 5, 0, "mV")
+        self.group_by.addItem("组别")
         self.an_cdf = QtWidgets.QComboBox()
         self.an_cdf.addItems(["按细胞平均", "等量抽取后合并", "全部事件合并"])
         self.an_cdf.setItemData(0, "推荐：每个细胞权重相同", Qt.ToolTipRole)
@@ -515,18 +513,18 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.addWidget(QtWidgets.QLabel("分析"), 0, 0, Qt.AlignRight)
         cells = [[],
                  [("组间指标", self.an_metric), ("累积分布画法", self.an_cdf)],
-                 [("I 细胞", self.an_other), ("NSFA 驱动力", self.an_df)]]
+                 [("一级：事件类型", self.family_choice)]]
         for r_, items in enumerate(cells):
             for c_, (lab, wd) in enumerate(items):
                 grid.addWidget(QtWidgets.QLabel(lab), r_, 2 * c_, Qt.AlignRight)
                 grid.addWidget(wd, r_, 2 * c_ + 1)
         grid.addWidget(self.an, 0, 1, 1, 3)
         grid.addWidget(b, 0, 4, 1, 2)
-        grid.addWidget(QtWidgets.QLabel("统计分组依据"), 2, 4)
+        grid.addWidget(QtWidgets.QLabel("二级：实验组来源"), 2, 4)
         grid.addWidget(self.group_by, 2, 5)
         grid.addWidget(self.clear_button("清除当前分析结果", "analysis"), 1, 4, 1, 2)
         grid.setColumnStretch(1, 3); grid.setColumnStretch(3, 2)
-        for cb in (self.an, self.an_metric, self.an_cdf, self.an_other, self.an_df):
+        for cb in (self.an, self.an_metric, self.an_cdf, self.family_choice):
             cb.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         controls.setLayout(grid)
         scroll = QtWidgets.QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(controls)
@@ -586,6 +584,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.cluster_panel.clear_result(); self.cluster_msg.clear()
                 self.refresh_cells(); self.refresh_trace(); self.refresh_events()
         self.dirty = True
+        if action in ("preprocess", "detect", "batch", "review", "cluster") and not self.save_session():
+            return
         self.statusBar().showMessage("已清除；可调整参数后重新运行。")
 
     def new_project(self):
@@ -794,6 +794,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 preset = presets[p] if presets is not None else detection.preset_from_path(p)
                 if preset:
                     cell.params.update(detection.PRESETS[preset])
+                    cell.event_family = "IPSC" if "IPSC" in preset else "EPSC"
                 self.add_cell(cell, refresh=False)
                 imported += 1
             except Exception as e:
@@ -879,7 +880,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 table.setHorizontalHeaderItem(8 + level, QtWidgets.QTableWidgetItem(f"目录 {level+1}"))
                 header = table.horizontalHeader()
                 header.moveSection(header.visualIndex(8+level), header.visualIndex(1)+1+level)
-        labels = ["组别", "动物", *(f"目录 {index+1}" for index in range(depth)), "事件类型", "备注"]
+        labels = ["组别", *(f"目录 {index+1}" for index in range(depth))]
         if self.group_by.count() != len(labels):
             previous = self.group_by.currentText()
             self.group_by.clear(); self.group_by.addItems(labels)
@@ -910,8 +911,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cell_table.setItem(i, 7, state)
         self.cell_table.blockSignals(False)
         self.update_cell_view()
-        cur = self.an_other.currentText()
-        self.an_other.clear(); self.an_other.addItems([c.name for c in self.project.cells]); self.an_other.setCurrentText(cur)
 
     def cell_value(self, row, column):
         if column == 6:
@@ -1047,6 +1046,8 @@ class MainWindow(QtWidgets.QMainWindow):
             cell.params.update(preset)
             self.dirty = True
         self.cell_table.selectRow(row)
+        if preset:
+            cell.event_family = "IPSC" if "IPSC" in name else "EPSC"
         self.on_cell_selected()
         self.refresh_cells()
 
@@ -1195,7 +1196,9 @@ class MainWindow(QtWidgets.QMainWindow):
                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
                 return
         for cell in cells:
+            old_family = cell.family()
             cell.clear_detection(preprocessing=True); cell.params.update(params)
+            cell.event_family = cell.family() if not old_family else old_family
         self.dirty = True; self.clear_deconv_view(); self.cluster_panel.clear_result(); self.cluster_msg.clear()
         self.an_panel.clear_result(); self.qc_result_cell = None
         self.refresh_cells(); self.refresh_trace(); self.refresh_events()
@@ -1284,7 +1287,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"正在批量检测 {len(cells)} 个细胞，并行上限 {lanes} …", total=len(cells))
 
     def _detected(self, msg):
-        self.statusBar().showMessage(msg)
+        saved = self.save_session()
+        self.statusBar().showMessage(msg + (" · 已自动保存" if saved else " · 保存失败，请重试"))
         self.refresh_cells()
         self.refresh_trace()
         self.refresh_events()
@@ -1424,6 +1428,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dirty = True
         self.refresh_events(); self.refresh_trace(); self.refresh_cells()
         self.ev_table.selectRow(min(rows[-1] + 1, len(c.events) - 1))
+        self.save_session()
 
     # ================================================================ 去卷积
     def fit_template(self):
@@ -1549,57 +1554,58 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ================================================================ 分析
     def run_analysis(self):
-        i = self.an.currentIndex()
-        c = self.current
-        need_cell = i <= 6
-        if need_cell and (c is None or c.events is None or c.mask().sum() < 5):
-            self.an_panel.text.setPlainText("请先选中一个已完成检测的细胞。"); return
-        metric = self.an_metric.currentText()
-        other = next((x for x in self.project.cells if x.name == self.an_other.currentText()), None)
-        dfm = self.an_df.value()
-        cdf_mode = ["cell_average", "pooled_equal", "pooled_all"][self.an_cdf.currentIndex()]
-        grouping = self.group_by.currentText()
+        from ..core.design import metric_figure
+        index = self.an.currentIndex()
+        family = self.family_choice.currentText()
         criterion = self.group_by.currentIndex()
+        grouping = self.group_by.currentText()
+        metric = self.an_metric.currentText()
+        mode = ["cell_average", "pooled_equal", "pooled_all"][self.an_cdf.currentIndex()]
         grouped = Project()
+        members = []
         for cell in self.project.cells:
-            if grouping == "备注":
-                label = cell.note.strip()
-            elif grouping == "事件类型":
-                label = next((name for name, preset in detection.PRESETS.items()
-                              if all(cell.params[key] == val for key, val in preset.items())), "自定义")
-            else:
-                label = cell.group if criterion == 0 else cell.animal if criterion == 1 else (
-                cell.folders[criterion-2] if len(cell.folders) > criterion-2 else "")
-            if label:
-                grouped.cells.append(replace(cell, group=label))
+            if cell.events is None or cell.failure or cell.family() != family:
+                continue
+            label = cell.group if criterion == 0 else (cell.folders[criterion-1] if len(cell.folders) >= criterion else "")
+            if label.strip():
+                grouped.cells.append(replace(cell, group=label.strip()))
+                members.append(cell)
+        if len({cell.group for cell in grouped.cells}) < 2:
+            self.an_panel.clear_result()
+            self.an_panel.text.setPlainText(f"{family} 内需要至少两个有检测结果的非空实验组（如 WT、KO）；请核对「{grouping}」。")
+            return
 
         def job():
-            if i == 0: return plots.cell_overview(c)
-            if i == 1: return plots.detection_qc(c)
-            if i == 2: return plots.rise_amp_figure(c)
-            if i == 3: return plots.temporal_figure(c)
-            if i == 4: return plots.nsfa_figure(c, driving_force_mv=dfm)
-            if i == 5: return plots.quantal_figure(c)
-            if i == 6:
-                if other is None or other.events is None or other is c:
-                    return plots.new_figure(3, 2), "请在“I 细胞”中选择另一个已检测的记录（例如同一细胞在 0 mV 记录的 sIPSC）。"
-                return plots.ei_figure(c, other)
-            if len({cell.group for cell in grouped.analyzed()}) < 2:
-                return plots.new_figure(3, 2), f"按「{grouping}」比较需要至少两个非空组有检测结果。"
-            if i == 7: return plots.group_comparison(grouped, metric)
-            if i == 8: return plots.cumulative_figure(grouped, mode=cdf_mode)
-            if i == 9: return plots.scaling_figure(grouped)
-            return plots.cluster_composition(grouped)
+            if index == 0:
+                return metric_figure(grouped, metric)
+            if not grouped.analyzed():
+                return plots.new_figure(), "无有效事件，不能绘制 CDF。"
+            return plots.cumulative_figure(grouped, mode=mode, design_aware=True)
 
         def done(out):
-            self.qc_result_cell = c if i == 1 else None
-            self.an_panel.show_result(*out)
-            self.archive_result(*out, dict(analysis=self.ANALYSES[i], grouping=grouping, group_labels={cell.name:cell.group for cell in grouped.cells}, analysis_members=sorted(cell.name for cell in self.project.cells), current=c.name if c else None, metric=metric,
-                                other=other.name if other else None, driving_force_mv=dfm, cdf_mode=cdf_mode), self.project.cells)
-
-        self.run_bg(job, done, f"正在运行：{self.an.currentText()} …")
+            fig, text = out
+            text = f"一级：{family}；二级：{grouping}；纳入 {len(members)} 条记录。\n" + text
+            self.an_panel.show_result(fig, text)
+            self.archive_result(fig, text, dict(analysis=self.ANALYSES[index], family=family, grouping=grouping,
+                group_labels={cell.name:cell.group for cell in grouped.cells}, analysis_members=sorted(cell.name for cell in self.project.cells),
+                metric=metric, cdf_mode=mode), members)
+        self.run_bg(job, done, f"正在运行：{family} · {self.an.currentText()} …")
 
     # ================================================================ 导出
+    def export_review_summary(self):
+        if not any(cell.events is not None for cell in self.project.cells):
+            QtWidgets.QMessageBox.information(self, "审核后统计", "尚无已检测的记录。")
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出全项目审核后逐细胞统计",
+            str(self.project_root / "results" / "reviewed_cells.csv"), "CSV (*.csv)")
+        if path:
+            try:
+                self.project.export_review_summary(path)
+            except (OSError, ValueError) as exc:
+                QtWidgets.QMessageBox.warning(self, "未能导出", str(exc))
+                return
+            self.statusBar().showMessage(f"审核后统计已导出：{path}")
+
     def export_tables(self):
         if not self.project.analyzed():
             QtWidgets.QMessageBox.information(self, "导出", "还没有检测结果。"); return
@@ -1610,6 +1616,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("已导出：" + "，".join(os.path.basename(f) for f in files))
 
     def release_project_resources(self):
+        detection.clear_model_cache()
         self.task_timer.stop()
         self.current = self.qc_result_cell = self.last_error = None
         self.project = Project()

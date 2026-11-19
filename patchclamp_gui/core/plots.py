@@ -444,7 +444,7 @@ def ei_figure(cell_e, cell_i) -> tuple[Figure, str]:
 
 
 def cumulative_figure(project, metrics=("amplitude", "iei"), mode: str = "cell_average",
-                      n_per_cell: int = 100, log_iei: bool = True) -> tuple[Figure, str]:
+                      n_per_cell: int = 100, log_iei: bool = True, design_aware=False) -> tuple[Figure, str]:
     """幅度与 IEI（及其他事件特征）的累积概率分布，多组叠加。
 
     mode：
@@ -474,9 +474,11 @@ def cumulative_figure(project, metrics=("amplitude", "iei"), mode: str = "cell_a
         logx = m == "iei" and log_iei and lo > 0
         grid = np.geomspace(lo, hi, 300) if logx else np.linspace(min(lo, 0) if m != "iei" else lo, hi, 300)
         curves = {}
+        units = {}
         for gi, g in enumerate(groups):
             col = PALETTE[gi % 6]
             per_cell = []
+            animal_ids = []
             pooled = []
             for _, sub in events[events["group"] == g].groupby("cell"):
                 v = pd.to_numeric(sub[m], errors="coerce").to_numpy(float)
@@ -485,10 +487,12 @@ def cumulative_figure(project, metrics=("amplitude", "iei"), mode: str = "cell_a
                     continue
                 ax.plot(v, np.arange(1, len(v) + 1) / len(v), color=col, alpha=0.25, lw=0.4)
                 per_cell.append(np.searchsorted(v, grid, side="right") / len(v))
+                animal_ids.append(str(sub["animal"].iloc[0]).strip())
                 pooled.append(v if mode == "pooled_all" else rng.choice(v, n_per_cell, replace=len(v) < n_per_cell))
             if not per_cell:
                 continue
             curves[g] = np.asarray(per_cell)
+            units[g] = animal_ids
             if mode == "cell_average":
                 P = np.array(per_cell)
                 mu = P.mean(axis=0)
@@ -507,6 +511,20 @@ def cumulative_figure(project, metrics=("amplitude", "iei"), mode: str = "cell_a
         comparisons = []
         for first, second in combinations(curves, 2):
             left, right = curves[first], curves[second]
+            permutation_type = "independent"
+            if design_aware:
+                ids = [units[first], units[second]]
+                if any(not value for side in ids for value in side):
+                    txt.append(f"{m}：{first} vs {second} 动物编号不全，仅展示。")
+                    continue
+                animals = [sorted(set(side)) for side in ids]
+                if set(animals[0]) & set(animals[1]):
+                    if animals[0] != animals[1]:
+                        txt.append(f"{m}：{first} vs {second} 部分配对，建议混合模型；不报告置换 p。")
+                        continue
+                    permutation_type = "samples"
+                left, right = [np.array([values[np.array(side)==animal].mean(axis=0) for animal in names])
+                               for values, side, names in zip((left,right), ids, animals)]
             if min(len(left), len(right)) < 2:
                 txt.append(f"{m}：{first} vs {second}，细胞数不足，未检验。")
                 continue
@@ -516,13 +534,15 @@ def cumulative_figure(project, metrics=("amplitude", "iei"), mode: str = "cell_a
             def statistic(one, two):
                 return distance(combined[one], combined[two])
             test = permutation_test((np.arange(len(left)), np.arange(len(left), len(combined))),
-                statistic, vectorized=False, alternative="greater", n_resamples=999, random_state=0)
+                statistic, permutation_type=permutation_type, vectorized=False, alternative="greater", n_resamples=999, random_state=0)
+            if design_aware:
+                txt.append(f"{m}：{first} vs {second} 推荐并执行动物{'内配对交换' if permutation_type=='samples' else '间独立标签置换'}，n={len(left)}/{len(right)}。")
             comparisons.append((first, second, test.statistic, test.pvalue))
         for first, second, delta, probability in comparisons:
             txt.append(f"{m}：{first} vs {second}，平均细胞 CDF 最大差={delta:.3g}，"
-                       f"细胞标签置换 p（该指标内 Bonferroni 校正）={min(1., probability * len(comparisons)):.3g}。")
+                       f"置换 p（该指标内 Bonferroni 校正）={min(1., probability * len(comparisons)):.3g}。")
         cm = "iei_median" if m == "iei" else f"{m}_median"
-        if len(groups) >= 2 and cm in cells_tab:
+        if not design_aware and len(groups) >= 2 and cm in cells_tab:
             r = st.compare_groups(cells_tab, cm)
             line = f"{FEATURE_LABELS.get(m, m)} 每个细胞的中位数：" + "，".join(
                 f"{g} {mm:.3g} ± {se:.2g}" for g, mm, se in zip(r["groups"], r["mean"], r["sem"]))
@@ -532,5 +552,6 @@ def cumulative_figure(project, metrics=("amplitude", "iei"), mode: str = "cell_a
             txt.append(line)
     if "iei" in metrics:
         txt.append("IEI 分布右移 = 频率降低；左移 = 频率升高。IEI 横轴默认取对数。")
-    txt.append("CDF 置换以细胞为单位，假设细胞独立，不是动物水平检验；同一动物的多个细胞不可当作独立动物。中位数比较是另外一项检验。")
+    txt.append("展示曲线按选定画法；检验先在动物内平均细胞 CDF。跨组重复编号必须代表同一动物。" if design_aware else
+               "CDF 置换以细胞为单位，假设细胞独立，不是动物水平检验。")
     return fig, "\n".join(txt)

@@ -33,6 +33,15 @@ class CellSession:
     folders: list[str] = field(default_factory=list)
     detected_signature: str = ""
     failure: str = ""
+    event_family: str = ""
+
+    def family(self):
+        if self.event_family:
+            return self.event_family
+        for name, preset in detection.PRESETS.items():
+            if all(self.params[key] == value for key, value in preset.items()):
+                return "IPSC" if "IPSC" in name else "EPSC"
+        return ""
 
     @property
     def name(self) -> str:
@@ -190,3 +199,19 @@ class Project:
         ct.to_csv(f"{stem}_cells.csv", index=False, encoding="utf-8-sig")
         paths += [f"{stem}_events.csv", f"{stem}_cells.csv"]
         return paths
+
+    def export_review_summary(self, path):
+        rows = []
+        for cell in self.cells:
+            if cell.events is None:
+                continue
+            row = cell.summary()
+            included = cell.mask()
+            manual = cell.events.get("manual", pd.Series(False, index=cell.events.index)).fillna(False).to_numpy(bool)
+            row.update(event_family=cell.family(), total_before_exclusion=len(included), excluded_events=int((~included).sum()),
+                       manual_included=int((manual & included).sum()), note=cell.note)
+            row.update({f"folder_{level}": name for level, name in enumerate(cell.folders, 1)})
+            rows.append(row)
+        if not rows:
+            raise ValueError("尚无已检测的记录。")
+        pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8-sig")

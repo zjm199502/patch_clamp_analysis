@@ -20,6 +20,10 @@ def test_miniml_inference():
     result = detection.detect_miniml(rec.data, rec.fs)
     assert result.method == "miniML" and len(result.onsets) > 0
     assert len(result.onsets) == len(result.scores)
+    cached = detection.detect_miniml(rec.data, rec.fs)
+    np.testing.assert_array_equal(result.onsets, cached.onsets)
+    np.testing.assert_allclose(result.scores, cached.scores, rtol=1e-6)
+    detection.clear_model_cache()
 
 
 @pytest.fixture(scope="module")

@@ -58,7 +58,7 @@ def save_project(root, project, destination=None):
                 group.attrs["record"] = _json(dict(name=rec.name, fs=rec.fs, unit=rec.unit, channel=rec.channel, path=relative))
                 group.create_dataset("metadata", data=_json(rec.meta))
                 group.attrs["cell"] = _json(dict(group=cell.group, animal=cell.animal, note=cell.note, folders=cell.folders, params=cell.params, qc=cell.qc,
-                                                detected_signature=cell.detected_signature, failure=cell.failure))
+                                                detected_signature=cell.detected_signature, failure=cell.failure, event_family=cell.family()))
                 if not relative:
                     group.create_dataset("data", data=rec.data)
                 for key in ("processed", "waves", "t_wave"):

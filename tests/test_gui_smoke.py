@@ -42,6 +42,14 @@ def test_gui_full_workflow(monkeypatch, tmp_path):
     w.cell_table.selectRow(0)
     n0 = int(w.current.mask().sum())
     w.ev_table.selectRow(0); w.toggle_exclude()
+    from patchclamp_gui.core.project_files import open_project
+    restored = open_project(w.project_root)
+    assert int(restored.cells[0].mask().sum()) == n0 - 1
+    import pandas as pd
+    csv_path = tmp_path / "审核.csv"
+    restored.export_review_summary(csv_path)
+    summary = pd.read_csv(csv_path)
+    assert summary.iloc[0].excluded_events == 1 and summary.iloc[0].n_events == n0 - 1
     assert int(w.current.mask().sum()) == n0 - 1
     w.fit_template(); w.run_deconv(); wait()
     assert w.deconv_res is not None and len(w.deconv_res.peaks) > 50
@@ -241,7 +249,7 @@ def test_directory_columns_and_vector_export(tmp_path, monkeypatch):
     source = tmp_path / "input.npy"
     np.save(source, np.arange(1000))
     window.add_files([str(source)], levels={str(source): ["WT", "positive"]})
-    assert window.group_by.itemText(3) == "目录 2"
+    assert window.group_by.itemText(2) == "目录 2"
     window.cell_table.item(0, 9).setText("negative")
     assert window.current.folders == ["WT", "negative"]
     target = tmp_path / "wave.svg"

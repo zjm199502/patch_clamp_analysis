@@ -65,6 +65,13 @@ def _graph_minmax(window):
     return tf.math.divide_no_nan(window - low, tf.reduce_max(window) - low)
 
 
+_model_cache = {}
+
+
+def clear_model_cache():
+    _model_cache.clear()
+
+
 def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_ms: float = 30.0,
                   model: str = "GC_lstm_model.h5", threshold: float = 0.5, batch_size: int = 512,
                   unit: str = "pA", callbacks: list | None = None) -> Detection:
@@ -87,11 +94,16 @@ def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_
     trace = MiniTrace(data=np.asarray(y, float), sampling_interval=1 / fs, y_unit=unit)
     if getattr(sys, "frozen", False):
         event.minmax_scaling = _graph_minmax
-    det = event.EventDetection(data=trace, model=model_path, window_size=win, model_threshold=threshold,
+    path = Path(model_path).resolve()
+    info = path.stat()
+    key = (str(path), info.st_size, info.st_mtime_ns)
+    det = event.EventDetection(data=trace, model=_model_cache.get(key, str(path)), window_size=win, model_threshold=threshold,
                          batch_size=batch_size, event_direction=direction,
-                         training_direction="negative", compile_model=True, verbose=0,
+                         training_direction="negative", compile_model=False, verbose=0,
                          callbacks=callbacks)
     det.detect_events(eval=False, resample_to_600=True)
+    clear_model_cache()
+    _model_cache[key] = det.model
     onsets = np.asarray(det.event_locations, int)
     scores = np.asarray(det.event_scores, float)
     order = np.argsort(onsets)
