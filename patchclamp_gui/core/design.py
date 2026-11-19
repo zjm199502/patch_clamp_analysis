@@ -15,21 +15,47 @@ def design(table):
 
 
 def metric_figure(project, metric):
-    from .plots import new_figure
+    from .plots import _group_bar, _label, new_figure
     table = project.cell_table().dropna(subset=[metric])
     fig = new_figure()
-    axis = fig.subplots()
     if table.empty:
         return fig, "没有该指标的有效值。"
+    table = table.assign(animal=table.animal.fillna("").astype(str).str.strip())
     kind, reason = design(table)
     units = table if kind == "unknown" else table.groupby(["animal", "group"], as_index=False)[metric].mean()
-    groups = list(units.group.unique())
+    groups = list(table.group.unique())
     samples = [units.loc[units.group == group, metric].to_numpy() for group in groups]
+    estimate = len(groups) == 2 and kind in ("independent", "paired") and min(map(len, samples)) >= 2
+    if estimate:
+        axis, difference_axis = fig.subplots(1, 2, width_ratios=[2, 1])
+    else:
+        axis = fig.subplots()
+    rng = np.random.default_rng(0)
     for index, values in enumerate(samples):
-        axis.scatter(np.full(len(values), index), values, alpha=.7)
-        axis.plot([index-.18, index+.18], [values.mean()]*2, color="black")
-    axis.set(xticks=range(len(groups)), xticklabels=groups, ylabel=metric)
+        _group_bar(axis, index, values, rng)
+    labels = [f"{group}\n(n={len(values)})" for group, values in zip(groups, samples)]
+    axis.set(xticks=range(len(groups)), xticklabels=labels, ylabel=_label(metric), title="Mean ± SEM")
     note = reason + "\n每点：" + ("细胞" if kind == "unknown" else "动物") + "；" + "，".join(f"{g}: n={len(v)}" for g,v in zip(groups,samples))
+    if estimate:
+        first, second = samples
+        difference = second.mean() - first.mean()
+        if kind == "paired":
+            paired = units.pivot(index="animal", columns="group", values=metric)
+            changes = paired[groups[1]] - paired[groups[0]]
+            se = changes.sem()
+            df = len(changes) - 1
+        else:
+            a, b = (np.var(v, ddof=1) / len(v) for v in samples)
+            se = np.sqrt(a + b)
+            denominator = a**2 / (len(first) - 1) + b**2 / (len(second) - 1)
+            df = (a + b)**2 / denominator if denominator else np.inf
+        margin = stats.t.ppf(.975, df) * se
+        comparison = f"{groups[1]} − {groups[0]}"
+        difference_axis.axhline(0, color="0.65", linestyle="--", linewidth=.7)
+        difference_axis.errorbar(0, difference, yerr=margin, fmt="o", color="black", capsize=3)
+        difference_axis.set(xticks=[0], xticklabels=[comparison], ylabel=_label(metric), title="Mean difference (95% CI)")
+        method = "配对 t 区间" if kind == "paired" else "Welch t 区间"
+        note += f"\n均值差（{comparison}）：{difference:.4g}，95% CI [{difference-margin:.4g}, {difference+margin:.4g}]（{method}）。"
     if kind not in ("independent", "paired") or len(groups)<2 or min(map(len,samples))<2:
         return fig, note + "\n未进行显著性检验。"
     if kind == "paired":

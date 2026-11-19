@@ -297,6 +297,13 @@ def quantal_figure(cell) -> tuple[Figure, str]:
 
 
 # ------------------------------------------------------------------ 组间
+def _group_bar(axis, i, v, rng):
+    axis.bar(i, np.mean(v) if len(v) else 0, width=0.6, color=PALETTE[i % 6], alpha=0.35)
+    if len(v) > 1:
+        axis.errorbar(i, np.mean(v), np.std(v, ddof=1) / np.sqrt(len(v)), color="k", capsize=2, lw=0.7)
+    axis.scatter(i + rng.uniform(-0.15, 0.15, len(v)), v, s=9, color=PALETTE[i % 6], edgecolor="k", lw=0.3, zorder=3)
+
+
 def group_comparison(project, metric: str = "amplitude_median", event_metric: str | None = None,
                      n_boot: int = 1000) -> tuple[Figure, str]:
     cells = project.cell_table()
@@ -312,10 +319,7 @@ def group_comparison(project, metric: str = "amplitude_median", event_metric: st
     rng = np.random.default_rng(0)
     for i, g in enumerate(groups):
         v = pd.to_numeric(cells.loc[cells["group"] == g, metric], errors="coerce").dropna().to_numpy()
-        ax0.bar(i, np.mean(v) if len(v) else 0, width=0.6, color=PALETTE[i % 6], alpha=0.35)
-        if len(v) > 1:
-            ax0.errorbar(i, np.mean(v), np.std(v, ddof=1) / np.sqrt(len(v)), color="k", capsize=2, lw=0.7)
-        ax0.scatter(i + rng.uniform(-0.15, 0.15, len(v)), v, s=9, color=PALETTE[i % 6], edgecolor="k", lw=0.3, zorder=3)
+        _group_bar(ax0, i, v, rng)
     ax0.set(xticks=range(len(groups)), xticklabels=[f"{g}\n(n={n})" for g, n in zip(groups, res["n"])],
             ylabel=_label(metric), ylim=(0, None))
     if np.isfinite(res.get("p", np.nan)):

@@ -93,13 +93,13 @@ class ZoomCanvas(FigureCanvasQTAgg):
 class FigurePanel(QtWidgets.QWidget):
     """matplotlib 图 + 文字结果 + 导出按钮。"""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, comparison=False):
         super().__init__(parent)
         self.fig = None
         self.canvas = None
         self.export_folder = Path.cwd()
         lay = QtWidgets.QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0)
-        self.split = QtWidgets.QSplitter(Qt.Vertical)
+        self.tabs = QtWidgets.QTabWidget() if comparison else None
         self.holder = QtWidgets.QWidget(); self.hl = QtWidgets.QVBoxLayout(self.holder)
         self.hl.setContentsMargins(0, 0, 0, 0)
         self.scroll = QtWidgets.QScrollArea(); self.scroll.setWidgetResizable(True)
@@ -108,9 +108,19 @@ class FigurePanel(QtWidgets.QWidget):
         mono = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)   # 表格类结果按列对齐
         mono.setPointSize(QtWidgets.QApplication.font().pointSize())
         self.text.setFont(mono)
-        self.split.addWidget(self.scroll); self.split.addWidget(self.text)
-        self.split.setStretchFactor(0, 3); self.split.setStretchFactor(1, 1)
-        lay.addWidget(self.split)
+        if self.tabs is not None:
+            self.members = QtWidgets.QTreeWidget()
+            self.members.setRootIsDecorated(False)
+            self.members.setHeaderLabels(["记录", "实验组", "动物编号"])
+            self.tabs.addTab(self.scroll, "图形")
+            self.tabs.addTab(self.text, "统计结果")
+            self.tabs.addTab(self.members, "纳入记录")
+            lay.addWidget(self.tabs)
+        else:
+            self.split = QtWidgets.QSplitter(Qt.Vertical)
+            self.split.addWidget(self.scroll); self.split.addWidget(self.text)
+            self.split.setStretchFactor(0, 3); self.split.setStretchFactor(1, 1)
+            lay.addWidget(self.split)
         row = QtWidgets.QHBoxLayout()
         b1 = QtWidgets.QPushButton("导出图（PDF/SVG/PNG）"); b1.clicked.connect(self.export_fig)
         b2 = QtWidgets.QPushButton("复制结果文字"); b2.clicked.connect(
@@ -123,13 +133,18 @@ class FigurePanel(QtWidgets.QWidget):
             self.hl.removeWidget(self.canvas); self.canvas.setParent(None); self.canvas.deleteLater()
         self.canvas = self.fig = None
         self.text.clear()
+        if self.tabs is not None:
+            self.members.clear()
+            self.tabs.setCurrentWidget(self.text)
 
     def show_result(self, fig, text=""):
         self.clear_result()
         self.fig = fig
         self.canvas = ZoomCanvas(fig)
         self.hl.addWidget(self.canvas)
-        if self.split.sizes()[0] < 300:
+        if self.tabs is not None:
+            self.tabs.setCurrentWidget(self.scroll)
+        elif self.split.sizes()[0] < 300:
             self.split.setSizes([640, 240])
         self.canvas.draw_idle()
         self.text.setPlainText(text)
@@ -548,7 +563,7 @@ class MainWindow(QtWidgets.QMainWindow):
         scroll.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustToContents)
         scroll.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Maximum)
         v.addWidget(scroll)
-        self.an_panel = FigurePanel(); v.addWidget(self.an_panel, 1)
+        self.an_panel = FigurePanel(comparison=True); v.addWidget(self.an_panel, 1)
         return w
 
     def clear_button(self, label, action):
@@ -1637,6 +1652,9 @@ class MainWindow(QtWidgets.QMainWindow):
             fig, text = out
             text = f"一级：{family}；二级：{grouping}；纳入 {len(members)} 条记录。\n" + text
             self.an_panel.show_result(fig, text)
+            for cell, original in zip(grouped.cells, members):
+                QtWidgets.QTreeWidgetItem(self.an_panel.members, [original.name, cell.group, original.animal])
+            self.an_panel.members.resizeColumnToContents(0)
             self.archive_result(fig, text, dict(analysis=self.ANALYSES[index], family=family, grouping=grouping, card_plan=mapping is not None, animal_identity=decision,
                 group_labels={cell.name:cell.group for cell in grouped.cells}, analysis_members=sorted(cell.name for cell in self.project.cells),
                 metric=metric, cdf_mode=mode), members)
