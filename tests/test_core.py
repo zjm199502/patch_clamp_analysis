@@ -24,6 +24,7 @@ def test_miniml_inference():
     np.testing.assert_array_equal(result.onsets, cached.onsets)
     np.testing.assert_allclose(result.scores, cached.scores, rtol=1e-6)
     packed = detection.detect_miniml(rec.data, rec.fs, packed=True)
+    assert packed.params["batch_size"] == 128 and result.params["batch_size"] == 512
     np.testing.assert_allclose(cached.trace, packed.trace, atol=2e-6)
     np.testing.assert_array_equal(cached.onsets, packed.onsets)
     detection.clear_model_cache()

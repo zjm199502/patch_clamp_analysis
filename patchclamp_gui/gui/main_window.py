@@ -348,6 +348,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.p["miniml_pipeline"] = QtWidgets.QComboBox()
         self.p["miniml_pipeline"].addItems(["标准", "整批滑窗（实验）"])
         form.addRow("miniML 推理方式", self.p["miniml_pipeline"])
+        batches = QtWidgets.QComboBox()
+        batches.addItems(["128", "256", "512", "1024"])
+        self.p["packed_batch"] = batches
+        form.addRow("整批滑窗：每批窗口数", batches)
+        batches.setEnabled(False)
+        self.p["miniml_pipeline"].currentIndexChanged.connect(lambda index: batches.setEnabled(index == 1))
         self.p["deconv_threshold_sd"] = _spin(4, 1, 20, 0.5, 1, "SD"); form.addRow("去卷积阈值", self.p["deconv_threshold_sd"])
         self.p["min_amplitude"] = _spin(0, 0, 1000, 1, 1, "pA"); form.addRow("最小幅度", self.p["min_amplitude"])
         ok, why = detection.miniml_available()
@@ -1070,7 +1076,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return out
 
     def write_params(self, params):
-        params = {"miniml_pipeline":"标准", **params}
+        params = {"miniml_pipeline":"标准", "packed_batch":"128", **params}
         for k, wd in self.p.items():
             if k not in params:
                 continue
@@ -1080,6 +1086,7 @@ class MainWindow(QtWidgets.QMainWindow):
             wd.blockSignals(True)
             wd.setCurrentText(str(val)) if isinstance(wd, QtWidgets.QComboBox) else wd.setValue(float(val))
             wd.blockSignals(False)
+        self.p["packed_batch"].setEnabled(self.p["miniml_pipeline"].currentIndex() == 1)
         self.d["tau_rise"].setValue(params["tau_rise_ms"]); self.d["tau_decay"].setValue(params["tau_decay_ms"])
 
     # ================================================================ 后台任务
@@ -1199,7 +1206,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def apply_selected(self):
         params = self.read_params()
-        cells = [cell for cell in self.selected_cells() if any(cell.params.get(key, "标准") != value for key, value in params.items())]
+        cells = [cell for cell in self.selected_cells() if any(cell.params.get(key, DEFAULT_PARAMS.get(key)) != value for key, value in params.items())]
         if not cells:
             self.statusBar().showMessage("未选中记录，或所选记录已使用这些参数。")
             return

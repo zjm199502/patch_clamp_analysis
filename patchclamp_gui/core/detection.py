@@ -99,7 +99,7 @@ def clear_model_cache():
 
 
 def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_ms: float = 30.0,
-                  model: str = "GC_lstm_model.h5", threshold: float = 0.5, batch_size: int = 512,
+                  model: str = "GC_lstm_model.h5", threshold: float = 0.5, batch_size: int | None = None,
                   unit: str = "pA", callbacks: list | None = None, packed=False) -> Detection:
     """调用 miniML 的 EventDetection。
 
@@ -117,6 +117,8 @@ def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_
     model_path = model if os.path.isabs(model) and os.path.exists(model) \
         else get_resource_file_path(f"models/{model}")
     win = int(round(window_ms / 1e3 * fs))
+    if batch_size is None:
+        batch_size = 128 if packed else 512
     trace = MiniTrace(data=np.asarray(y, float), sampling_interval=1 / fs, y_unit=unit)
     if getattr(sys, "frozen", False):
         event.minmax_scaling = _graph_minmax
@@ -140,7 +142,7 @@ def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_
     order = np.argsort(onsets)
     return Detection(onsets=onsets[order], scores=scores[order] if len(scores) == len(onsets) else scores,
                      method="miniML", trace=np.asarray(det.prediction, float), threshold=threshold,
-                     params=dict(model=model, window_ms=window_ms, threshold=threshold, direction=direction))
+                     params=dict(model=model, window_ms=window_ms, threshold=threshold, direction=direction, batch_size=batch_size))
 
 
 def detect_deconv(y: np.ndarray, fs: float, direction: str = "negative", tau_rise_ms: float = 0.4,

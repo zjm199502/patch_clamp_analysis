@@ -12,7 +12,7 @@ from ..io import Recording
 DEFAULT_PARAMS = dict(
     direction="negative", window_ms=30.0, tau_rise_ms=0.4, tau_decay_ms=4.0,
     lowpass_hz=1000.0, highpass_hz=0.0, notch_hz=50.0, detrend_s=1.0,
-    detector="miniML", model="GC_lstm_model.h5", threshold=0.5,
+    detector="miniML", model="GC_lstm_model.h5", threshold=0.5, miniml_pipeline="标准", packed_batch="128",
     deconv_threshold_sd=4.0, deconv_smooth_ms=0.5, min_amplitude=0.0,
 )
 
@@ -69,8 +69,10 @@ class CellSession:
         """返回 y -> onsets 的函数（供质控模块用同样的参数重复检测）。"""
         p, fs = self.params, self.rec.fs
         if p["detector"] == "miniML":
+            packed = p.get("miniml_pipeline") == "整批滑窗（实验）"
             return lambda y: detection.detect_miniml(y, fs, p["direction"], p["window_ms"], p["model"],
-                                                     p["threshold"], unit=self.rec.unit, packed=p.get("miniml_pipeline") == "整批滑窗（实验）")
+                    p["threshold"], batch_size=int(p.get("packed_batch", 128)) if packed else None,
+                    unit=self.rec.unit, packed=packed)
         return lambda y: detection.detect_deconv(y, fs, p["direction"], p["tau_rise_ms"], p["tau_decay_ms"],
                                                  p["deconv_threshold_sd"], p["deconv_smooth_ms"])
 
