@@ -89,9 +89,14 @@ class FigurePanel(QtWidgets.QWidget):
         row.addStretch(1); row.addWidget(b2); row.addWidget(b1)
         lay.addLayout(row)
 
-    def show_result(self, fig, text=""):
+    def clear_result(self):
         if self.canvas is not None:
             self.hl.removeWidget(self.canvas); self.canvas.setParent(None); self.canvas.deleteLater()
+        self.canvas = self.fig = None
+        self.text.clear()
+
+    def show_result(self, fig, text=""):
+        self.clear_result()
         self.fig = fig
         self.canvas = ZoomCanvas(fig)
         self.hl.addWidget(self.canvas)
@@ -124,6 +129,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current: CellSession | None = None
         self.workers: list[Worker] = []
         self.deconv_res = None
+        self.qc_result_cell = None
         self.last_error = None
         self.settings = QtCore.QSettings("PatchClampAnalysis", "PatchClampAnalysis")
         self._build_menu()
@@ -214,6 +220,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for label, fn in (("预览预处理", self.run_preprocess), ("检测当前细胞", self.run_detect_current),
                           ("批量检测全部细胞", self.run_detect_all)):
             b = QtWidgets.QPushButton(label); b.clicked.connect(fn); form.addRow(b)
+        for label, action in (("清除当前细胞预处理及检测", "preprocess"), ("清除当前细胞检测", "detect"),
+                              ("清除全部细胞检测…", "batch")):
+            form.addRow(self.clear_button(label, action))
         self.info = QtWidgets.QLabel(""); self.info.setWordWrap(True); form.addRow(self.info)
         scroll = QtWidgets.QScrollArea(); scroll.setWidget(form_w); scroll.setWidgetResizable(True)
         scroll.setFixedWidth(330)
@@ -247,6 +256,7 @@ class MainWindow(QtWidgets.QMainWindow):
         b = QtWidgets.QPushButton("排除 / 恢复所选事件（Del）"); b.clicked.connect(self.toggle_exclude); row.addWidget(b)
         QtGui.QShortcut(QtGui.QKeySequence(Qt.Key_Delete), self.ev_table, self.toggle_exclude)
         self.ev_count = QtWidgets.QLabel(""); row.addWidget(self.ev_count)
+        row.addWidget(self.clear_button("清除审核标记", "review"))
         v.addLayout(row)
         w.addWidget(left)
         g = pg.GraphicsLayoutWidget()
@@ -276,6 +286,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "系统性偏离（衰减太快/太慢）说明应调整 τ，或事件动力学不均一（→ 动力学聚类）。")
         tip.setWordWrap(True); tip.setStyleSheet("color:#555"); form.addRow(tip)
         self.deconv_info = QtWidgets.QLabel(""); self.deconv_info.setWordWrap(True); form.addRow(self.deconv_info)
+        form.addRow(self.clear_button("清除去卷积结果", "deconv"))
         h.addWidget(fw)
         g = pg.GraphicsLayoutWidget()
         self.pd1 = g.addPlot(row=0, col=0, title="原始记录（灰）与去噪重建（红）")
@@ -311,6 +322,7 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("聚类方法", self.c["method"]); form.addRow("簇数", self.c["k"]); form.addRow("二维展示", self.c["emb"])
         form.addRow(self.c["nooverlap"])
         b = QtWidgets.QPushButton("运行聚类"); b.clicked.connect(self.run_cluster); form.addRow(b)
+        form.addRow(self.clear_button("清除所选范围的聚类", "cluster"))
         self.cluster_msg = QtWidgets.QLabel(""); self.cluster_msg.setWordWrap(True); form.addRow(self.cluster_msg)
         h.addWidget(fw)
         self.cluster_panel = FigurePanel(); h.addWidget(self.cluster_panel, 1)
@@ -356,6 +368,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 grid.addWidget(wd, r_, 2 * c_ + 1)
         grid.addWidget(self.an, 0, 1, 1, 3)
         grid.addWidget(b, 0, 4, 1, 2)
+        grid.addWidget(self.clear_button("清除当前分析结果", "analysis"), 1, 4, 1, 2)
         grid.setColumnStretch(1, 3); grid.setColumnStretch(3, 2)
         for cb in (self.an, self.an_metric, self.an_cdf, self.an_other, self.an_df):
             cb.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
@@ -363,6 +376,57 @@ class MainWindow(QtWidgets.QMainWindow):
         v.addLayout(row)
         self.an_panel = FigurePanel(); v.addWidget(self.an_panel, 1)
         return w
+
+    def clear_button(self, label, action):
+        button = QtWidgets.QPushButton(label)
+        button.clicked.connect(lambda: self.clear_results(action))
+        return button
+
+    def clear_deconv_view(self):
+        self.deconv_res = None
+        self.deconv_info.clear()
+        for curve in (self.cd_raw, self.cd_rec, self.cd_dec, self.cd_pk, self.cd_rate):
+            curve.setData([], [])
+        self.cd_thr.hide()
+
+    def clear_results(self, action):
+        if self.workers:
+            self.statusBar().showMessage("分析任务仍在运行，请在任务结束后清除。")
+            return
+        pooled = action == "batch" or (action == "cluster" and self.c["scope"].currentIndex() == 1)
+        cells = self.project.cells if pooled else ([self.current] if self.current else [])
+        if not cells and action != "analysis":
+            return
+        scope = f"全部 {len(cells)} 个细胞" if pooled else (self.current.name if cells else "")
+        effects = {"preprocess": "清除预处理、检测、审核、质控和聚类结果", "detect": "清除检测、审核、质控和聚类结果，保留预处理",
+                   "batch": "清除检测、审核、质控和聚类结果，保留预处理", "review": "恢复所有被排除的事件，并清除该细胞的旧聚类和检测质控",
+                   "cluster": "删除簇标签，保留检测和审核", "deconv": "清除去卷积图和结果，保留已采用的检测结果"}
+        if action != "analysis":
+            answer = QtWidgets.QMessageBox.question(self, "确认清除", f"{scope}：{effects[action]}。\n保留原始记录和参数。继续吗？",
+                                                   QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+            if answer != QtWidgets.QMessageBox.Yes:
+                return
+        if action in ("preprocess", "detect", "batch"):
+            for cell in cells:
+                cell.clear_detection(preprocessing=action == "preprocess")
+        elif action in ("review", "cluster"):
+            for cell in cells:
+                if cell.events is not None:
+                    cell.events["cluster"] = -1
+                    if action == "review":
+                        cell.events["excluded"] = False
+                        cell.clear_qc_results()
+        if action in ("deconv", "preprocess", "detect", "batch"):
+            self.clear_deconv_view()
+        if action != "deconv":
+            if action == "analysis" and self.qc_result_cell is not None:
+                self.qc_result_cell.clear_qc_results()
+            self.qc_result_cell = None
+            self.an_panel.clear_result()
+            if action != "analysis":
+                self.cluster_panel.clear_result(); self.cluster_msg.clear()
+                self.refresh_cells_keep(); self.refresh_trace(); self.refresh_events()
+        self.statusBar().showMessage("已清除；可调整参数后重新运行。")
 
     # ================================================================ 细胞管理
     def open_files(self):
@@ -443,7 +507,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.current = self.project.cells[r]
         self.write_params(self.current.params)
-        self.deconv_res = None
+        self.clear_deconv_view()
         self.refresh_trace(reset=True)
         self.refresh_events()
 
@@ -557,6 +621,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.c_proc.setData([], [])
         self.c_events.setData([], []); self.c_det.setData([], [])
+        self.thr_line.setVisible(c.det is not None and c.det.trace is not None)
         if c.events is not None and len(c.events):
             off = np.median(c.rec.data) - np.median(c.processed)
             pk = c.events["peak_idx"].to_numpy(int)
@@ -585,6 +650,7 @@ class MainWindow(QtWidgets.QMainWindow):
         c = self.current
         self.ev_table.blockSignals(True)
         self.ev_table.clear(); self.p_avg.clear()
+        self.c_ev_trace.setData([], []); self.c_ev_mark.setData([], []); self.ev_count.clear()
         if c is None or c.events is None:
             self.ev_table.setRowCount(0); self.ev_table.blockSignals(False); return
         df = c.events
@@ -669,7 +735,10 @@ class MainWindow(QtWidgets.QMainWindow):
                                      smooth_ms=d["smooth"], highpass_hz=d["hp"], threshold_sd=d["thr"])
 
         def done(res):
+            if self.current is not c:
+                return
             self.deconv_res = res
+            self.cd_thr.show()
             t = c.rec.time
             base = c.processed - np.median(c.processed)
             self.cd_raw.setData(t, base); self.cd_rec.setData(t, res.reconvolved)
@@ -789,6 +858,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return plots.cluster_composition(self.project)
 
         def done(out):
+            self.qc_result_cell = c if i == 1 else None
             self.an_panel.show_result(*out)
             self.statusBar().showMessage("分析完成")
 

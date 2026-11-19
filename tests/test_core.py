@@ -6,6 +6,22 @@ from patchclamp_gui.core import clustering, deconv, detection, stats, temporal, 
 from patchclamp_gui.core.session import CellSession, Project
 
 
+def test_packaged_minmax_without_autograph():
+    tf = pytest.importorskip("tensorflow")
+    normalize = tf.function(detection._graph_minmax, autograph=False)
+    for values, expected in (([-3., -2., 1.], [0., 0.25, 1.]), ([4., 4.], [0., 0.])):
+        window = tf.constant(values)[:, None]
+        np.testing.assert_allclose(normalize(window).numpy(), np.array(expected)[:, None])
+
+
+def test_miniml_inference():
+    pytest.importorskip("miniml")
+    rec = io.simulate_recording(4, seed=1)
+    result = detection.detect_miniml(rec.data, rec.fs)
+    assert result.method == "miniML" and len(result.onsets) > 0
+    assert len(result.onsets) == len(result.scores)
+
+
 @pytest.fixture(scope="module")
 def cell():
     rec = io.simulate_recording(90, seed=3, noise_sd=1.5)

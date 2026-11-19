@@ -42,6 +42,14 @@ def miniml_models() -> list[str]:
         return []
 
 
+def _graph_minmax(window):
+    """miniML 1.1.2 的逐窗口归一化；独立版没有源码供 AutoGraph 转换 Python if。"""
+    import tensorflow as tf
+
+    low = tf.reduce_min(window)
+    return tf.math.divide_no_nan(window - low, tf.reduce_max(window) - low)
+
+
 def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_ms: float = 30.0,
                   model: str = "GC_lstm_model.h5", threshold: float = 0.5, batch_size: int = 512,
                   unit: str = "pA", callbacks: list | None = None) -> Detection:
@@ -52,8 +60,9 @@ def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_
     的相对路径，也可以是用户迁移学习得到的 .h5 文件的绝对路径。
     """
     import os
+    import sys
 
-    from miniml.core.event import EventDetection
+    from miniml.core import event
     from miniml.core.trace import MiniTrace
     from miniml.resources.util import get_resource_file_path
 
@@ -61,7 +70,9 @@ def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_
         else get_resource_file_path(f"models/{model}")
     win = int(round(window_ms / 1e3 * fs))
     trace = MiniTrace(data=np.asarray(y, float), sampling_interval=1 / fs, y_unit=unit)
-    det = EventDetection(data=trace, model=model_path, window_size=win, model_threshold=threshold,
+    if getattr(sys, "frozen", False):
+        event.minmax_scaling = _graph_minmax
+    det = event.EventDetection(data=trace, model=model_path, window_size=win, model_threshold=threshold,
                          batch_size=batch_size, event_direction=direction,
                          training_direction="negative", compile_model=True, verbose=0,
                          callbacks=callbacks)

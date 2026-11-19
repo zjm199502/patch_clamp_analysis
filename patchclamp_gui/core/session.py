@@ -34,6 +34,17 @@ class CellSession:
     def name(self) -> str:
         return self.rec.name
 
+    def clear_qc_results(self):
+        for key in ("detection_limit_pA", "fp_rate_hz", "fp_fraction"):
+            self.qc.pop(key, None)
+
+    def clear_detection(self, *, preprocessing=False):
+        self.det = self.events = self.waves = self.t_wave = None
+        self.clear_qc_results()
+        if preprocessing:
+            self.processed = None
+            self.qc.clear()
+
     def run_preprocess(self) -> np.ndarray:
         p = self.params
         self.processed = preprocess.preprocess(self.rec.data, self.rec.fs, p["lowpass_hz"],
