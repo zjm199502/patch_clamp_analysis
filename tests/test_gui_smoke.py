@@ -105,11 +105,60 @@ def test_import_subset_and_reopen(tmp_path, monkeypatch):
     assert window.font().pointSize() == 12 and window.tabs.widget(0).count() == 2
     window.set_ui_points(10)
     assert window.save_session()
+    from patchclamp_gui.core import import_metadata
+    import csv
+    template = tmp_path / "annotation.csv"
+    window.project.cells[1].note = "测试,备注"
+    import_metadata.template(template, root, window.project.cells, False)
+    with template.open(encoding="utf-8-sig", newline="") as stream:
+        rows = list(csv.reader(stream))
+    rows[2][2] = "新组"
+    with template.open("w", encoding="utf-8-sig", newline="") as stream:
+        csv.writer(stream).writerows([rows[0], *rows[:0:-1]])
+    assert import_metadata.template(template, root, window.project.cells, True) == 3
+    assert window.save_session()
+    assert {group for _, group in import_metadata.scan(tmp_path, root)} == {"0", "1", "2"}
     other = MainWindow()
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *args: None)
     assert not other.activate_project(root)
     window.close()
     assert other.activate_project(root)
+    assert (other.project.cells[1].group, other.project.cells[1].note) == ("新组", "测试,备注")
     assert [cell.params["lowpass_hz"] for cell in other.project.cells] == [800, 1000, 800]
     assert len({cell.name for cell in other.project.cells}) == 3
     other.close()
+
+
+def test_cancel_paused_batch(tmp_path):
+    import threading
+    import time
+    from types import SimpleNamespace
+    from patchclamp_gui.gui.main_window import MainWindow
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow()
+    assert window.activate_project(tmp_path / "pause-test", create=True)
+    started, release = threading.Event(), threading.Event()
+    completed = []
+
+    def preprocess():
+        started.set()
+        assert release.wait(5)
+
+    cell = SimpleNamespace(name="test", run_preprocess=preprocess, run_detection=lambda: completed.append(True) or 1)
+    window.detect_batch([cell, cell])
+    assert started.wait(5)
+    window.pause_button.click()
+    release.set()
+    deadline = time.monotonic() + 5
+    while window.task_stage != "已暂停，等待继续" and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.01)
+    assert window.task_stage == "已暂停，等待继续"
+    window.cancel_button.click()
+    deadline = time.monotonic() + 5
+    while window.workers and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.01)
+    assert not window.workers and completed == [True]
+    assert "已取消" in window.statusBar().currentMessage()
+    window.close()

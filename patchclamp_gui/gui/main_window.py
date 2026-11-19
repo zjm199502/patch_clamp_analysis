@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import csv
+import threading
 import traceback
 from pathlib import Path
 
@@ -13,6 +15,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from .. import __version__, io
 from ..core import clustering, deconv, detection, plots, project_files
 from ..core.features import FEATURES
+from ..core import import_metadata
 from ..core.session import DEFAULT_PARAMS, CellSession, Project
 from .update_ui import UpdateManager
 
@@ -156,6 +159,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project_actions.append(m.addAction("保存项目", self.save_session, "Ctrl+S"))
         self.project_actions.append(m.addAction("打开项目结果文件夹", self.show_results_folder))
         m.addSeparator()
+        self.project_actions.append(m.addAction("递归添加文件夹…", self.open_folder))
+        self.project_actions.append(m.addAction("导出分组备注 CSV 模板…", lambda: self.annotation_csv(False)))
+        self.project_actions.append(m.addAction("导入分组备注 CSV…", lambda: self.annotation_csv(True)))
         for text, fn, key in (("打开记录（ABF / H5）…", self.open_files, "Ctrl+O"), ("载入模拟演示数据", self.load_demo, None),
                               (None, None, None), ("导出结果表（事件 + 细胞汇总 CSV）…", self.export_tables, "Ctrl+E"),
                               (None, None, None), ("退出", self.close, None)):
@@ -215,8 +221,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cell_dock = dock
         dock.setFeatures(QtWidgets.QDockWidget.NoDockWidgetFeatures)
         w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
-        self.cell_table = QtWidgets.QTableWidget(0, 5)
-        self.cell_table.setHorizontalHeaderLabels(["文件", "组别", "动物", "事件数", "频率 Hz"])
+        self.cell_table = QtWidgets.QTableWidget(0, 6)
+        self.cell_table.setHorizontalHeaderLabels(["文件", "组别", "动物", "事件数", "频率 Hz", "备注"])
         self.cell_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
         self.cell_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.cell_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
@@ -224,7 +230,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cell_table.itemChanged.connect(self.on_cell_edited)
         v.addWidget(self.cell_table)
         row = QtWidgets.QHBoxLayout()
-        for label, fn in (("添加文件", self.open_files), ("移除", self.remove_cell)):
+        for label, fn in (("添加文件", self.open_files), ("添加文件夹", self.open_folder), ("移除", self.remove_cell)):
             b = QtWidgets.QPushButton(label); b.clicked.connect(fn); row.addWidget(b)
         v.addLayout(row)
         dock.setWidget(w); dock.setMinimumWidth(300)
@@ -253,6 +259,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.progress.setAlignment(Qt.AlignCenter)
         self.progress.hide()
         self.statusBar().addPermanentWidget(self.progress, 1)
+        self.batch_condition = threading.Condition()
+        self.batch_paused = self.batch_cancelled = False
+        self.pause_button = QtWidgets.QPushButton("暂停")
+        self.cancel_button = QtWidgets.QPushButton("取消批处理")
+        self.pause_button.clicked.connect(self.toggle_batch_pause)
+        self.cancel_button.clicked.connect(self.cancel_batch)
+        for button in (self.pause_button, self.cancel_button):
+            self.statusBar().addPermanentWidget(button)
+            button.hide()
         self.task_clock = QtCore.QElapsedTimer()
         self.task_timer = QtCore.QTimer(self)
         self.task_timer.timeout.connect(self.update_task_status)
@@ -600,7 +615,37 @@ class MainWindow(QtWidgets.QMainWindow):
             self.settings.setValue("last_dir", os.path.dirname(paths[0]))
             self.add_files(paths)
 
-    def add_files(self, paths):
+    def annotation_csv(self, importing):
+        if not self.project_root or self.workers:
+            return
+        dialog = QtWidgets.QFileDialog
+        path, _ = (dialog.getOpenFileName(self, "导入模板（空值将清除旧值）", str(self.project_root), "CSV (*.csv)") if importing
+                   else dialog.getSaveFileName(self, "导出模板", str(self.project_root / "记录信息.csv"), "CSV (*.csv)"))
+        if path:
+            try:
+                count = import_metadata.template(path, self.project_root, self.project.cells, importing)
+                if importing:
+                    self.dirty = True
+                    self.refresh_cells()
+                    if not self.save_session():
+                        return
+                self.statusBar().showMessage(f"CSV 操作完成：{count} 条记录")
+            except (OSError, ValueError, csv.Error) as exc:
+                QtWidgets.QMessageBox.warning(self, "CSV 模板", str(exc))
+
+    def open_folder(self):
+        if not self.project_root or self.workers:
+            return
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "递归添加文件夹", self.settings.value("last_dir", ""))
+        if folder:
+            groups = {str(path): group for path, group in import_metadata.scan(folder, self.project_root)}
+            if not groups:
+                self.statusBar().showMessage("文件夹中没有支持的记录")
+                return
+            self.settings.setValue("last_dir", folder)
+            self.add_files(list(groups), groups)
+
+    def add_files(self, paths, groups=None):
         if self.project_root is None or self.workers:
             return
         for p in paths:
@@ -616,7 +661,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         ch = inf["channels"][items.index(it)]
                 record = io.load_any(p, channel=ch)
                 record.path = str(project_files.copy_raw(self.project_root, p))
-                self.add_cell(CellSession(record))
+                self.add_cell(CellSession(record, group=(groups or {}).get(p, "")))
             except Exception as e:
                 QtWidgets.QMessageBox.warning(self, "读取失败", f"{p}\n{e}")
 
@@ -668,10 +713,10 @@ class MainWindow(QtWidgets.QMainWindow):
         for i, c in enumerate(self.project.cells):
             n = int(c.mask().sum()) if c.events is not None else None
             vals = [c.name, c.group, c.animal, "" if n is None else str(n),
-                    "" if n is None else f"{n / c.rec.duration:.2f}"]
+                    "" if n is None else f"{n / c.rec.duration:.2f}", c.note]
             for j, val in enumerate(vals):
                 it = QtWidgets.QTableWidgetItem(val)
-                if j not in (1, 2):
+                if j not in (1, 2, 5):
                     it.setFlags(it.flags() & ~Qt.ItemIsEditable)
                 self.cell_table.setItem(i, j, it)
         self.cell_table.blockSignals(False)
@@ -685,6 +730,8 @@ class MainWindow(QtWidgets.QMainWindow):
             c.group = it.text().strip()
         elif it.column() == 2:
             c.animal = it.text().strip()
+        elif it.column() == 5:
+            c.note = it.text()
 
     def on_cell_selected(self):
         r = self.cell_table.currentRow()
@@ -724,7 +771,23 @@ class MainWindow(QtWidgets.QMainWindow):
     # ================================================================ 后台任务
     def update_task_status(self):
         seconds = self.task_clock.elapsed() // 1000
-        self.statusBar().showMessage(f"{self.task_stage} · 已用 {seconds // 60:02d}:{seconds % 60:02d}")
+        state = "取消中（保留已完成记录）" if self.batch_cancelled else "暂停请求（记录之间等待）" if self.batch_paused else ""
+        self.statusBar().showMessage(f"{state} {self.task_stage} · 已用 {seconds // 60:02d}:{seconds % 60:02d}")
+
+    def toggle_batch_pause(self):
+        with self.batch_condition:
+            self.batch_paused = not self.batch_paused
+            self.batch_condition.notify_all()
+        self.pause_button.setText("继续" if self.batch_paused else "暂停")
+        self.update_task_status()
+
+    def cancel_batch(self):
+        with self.batch_condition:
+            self.batch_cancelled = True
+            self.batch_condition.notify_all()
+        self.pause_button.setEnabled(False)
+        self.cancel_button.setEnabled(False)
+        self.update_task_status()
 
     @QtCore.Slot(int, str)
     def batch_advanced(self, completed, stage):
@@ -741,6 +804,11 @@ class MainWindow(QtWidgets.QMainWindow):
             action.setEnabled(False)
         self.last_error = None
         self.task_stage = msg
+        self.batch_paused = self.batch_cancelled = False
+        self.pause_button.setText("暂停")
+        for button in (self.pause_button, self.cancel_button):
+            button.setVisible(bool(total))
+            button.setEnabled(True)
         self.task_clock.start()
         self.update_task_status()
         self.task_timer.start(1000)
@@ -754,6 +822,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def unlock():
             self.task_timer.stop()
+            self.pause_button.hide()
+            self.cancel_button.hide()
             self.progress.hide(); self.workers.remove(wk)
             self.tabs.setEnabled(True); self.cell_dock.setEnabled(True)
             for action in self.project_actions:
@@ -832,15 +902,21 @@ class MainWindow(QtWidgets.QMainWindow):
         def job(report):
             tot = 0
             for index, c in enumerate(cells):
+                with self.batch_condition:
+                    if self.batch_paused and not self.batch_cancelled:
+                        report(index, "已暂停，等待继续")
+                    self.batch_condition.wait_for(lambda: not self.batch_paused or self.batch_cancelled)
+                    if self.batch_cancelled:
+                        return f"已取消：保留 {index}/{len(cells)} 条已完成记录，共 {tot} 个事件"
                 label = f"第 {index + 1} 条 · {c.name[:36]}"
                 report(index, f"预处理：{label}")
                 c.run_preprocess()
                 report(index, f"检测：{label}")
                 tot += c.run_detection()
                 report(index + 1, f"已完成：{label}")
-            return tot
+            return f"批量检测完成：{len(cells)} 个细胞，共 {tot} 个事件"
 
-        self.run_bg(job, lambda n: self._detected(f"批量检测完成：{len(cells)} 个细胞，共 {n} 个事件"),
+        self.run_bg(job, self._detected,
                     f"正在批量检测 {len(cells)} 个细胞 …", total=len(cells))
 
     def _detected(self, msg):

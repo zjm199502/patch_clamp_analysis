@@ -29,6 +29,7 @@ class CellSession:
     waves: np.ndarray | None = None
     t_wave: np.ndarray | None = None
     qc: dict = field(default_factory=dict)
+    note: str = ""
 
     @property
     def name(self) -> str:
