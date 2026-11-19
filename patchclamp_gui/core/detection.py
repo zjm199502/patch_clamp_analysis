@@ -68,13 +68,39 @@ def _graph_minmax(window):
 _model_cache = {}
 
 
+def _packed_predict(detector):
+    import tensorflow as tf
+    from scipy.signal import resample
+    data = resample(detector.trace.data, round(len(detector.trace.data) * detector.resampling_factor))
+    if detector.event_direction != detector.training_direction:
+        data *= -1
+    width = round(detector.window_size * detector.resampling_factor)
+    step = round(detector.stride_length * detector.resampling_factor)
+    windows = np.lib.stride_tricks.sliding_window_view(data.astype(np.float32), width)[::step]
+    infer = getattr(detector.model, "_clamp_infer", None)
+    if infer is None or getattr(detector.model, "_clamp_width", None) != width:
+        model = detector.model
+        @tf.function(input_signature=[tf.TensorSpec((None, width, 1), tf.float32)], autograph=False)
+        def infer(batch):
+            low = tf.reduce_min(batch, axis=1, keepdims=True)
+            scaled = tf.math.divide_no_nan(batch-low, tf.reduce_max(batch, axis=1, keepdims=True)-low)
+            return model(scaled, training=False)
+        model._clamp_infer = infer
+        model._clamp_width = width
+    predictions = []
+    for start in range(0, len(windows), detector.batch_size):
+        batch = tf.convert_to_tensor(np.ascontiguousarray(windows[start:start+detector.batch_size, :, None]))
+        predictions.append(infer(batch).numpy().reshape(-1))
+    detector.prediction = tf.convert_to_tensor(np.concatenate(predictions))
+
+
 def clear_model_cache():
     _model_cache.clear()
 
 
 def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_ms: float = 30.0,
                   model: str = "GC_lstm_model.h5", threshold: float = 0.5, batch_size: int = 512,
-                  unit: str = "pA", callbacks: list | None = None) -> Detection:
+                  unit: str = "pA", callbacks: list | None = None, packed=False) -> Detection:
     """调用 miniML 的 EventDetection。
 
     window_ms 应覆盖一个完整事件（约为衰减时间常数的 8–12 倍）；miniML 会把该窗口重采样到
@@ -101,7 +127,12 @@ def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_
                          batch_size=batch_size, event_direction=direction,
                          training_direction="negative", compile_model=False, verbose=0,
                          callbacks=callbacks)
-    det.detect_events(eval=False, resample_to_600=True)
+    if packed and not callbacks and hasattr(det, "_EventDetection__predict"):
+        det._EventDetection__predict = lambda: _packed_predict(det)
+    try:
+        det.detect_events(eval=False, resample_to_600=True)
+    finally:
+        det.__dict__.pop("_EventDetection__predict", None)
     clear_model_cache()
     _model_cache[key] = det.model
     onsets = np.asarray(det.event_locations, int)

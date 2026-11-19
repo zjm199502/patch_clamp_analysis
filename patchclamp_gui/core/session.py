@@ -70,7 +70,7 @@ class CellSession:
         p, fs = self.params, self.rec.fs
         if p["detector"] == "miniML":
             return lambda y: detection.detect_miniml(y, fs, p["direction"], p["window_ms"], p["model"],
-                                                     p["threshold"], unit=self.rec.unit)
+                                                     p["threshold"], unit=self.rec.unit, packed=p.get("miniml_pipeline") == "整批滑窗（实验）")
         return lambda y: detection.detect_deconv(y, fs, p["direction"], p["tau_rise_ms"], p["tau_decay_ms"],
                                                  p["deconv_threshold_sd"], p["deconv_smooth_ms"])
 

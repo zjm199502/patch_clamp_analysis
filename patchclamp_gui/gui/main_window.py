@@ -345,6 +345,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.p["model"].addItems(detection.miniml_models() or ["GC_lstm_model.h5"])
         form.addRow("miniML 模型", self.p["model"])
         self.p["threshold"] = _spin(0.5, 0.05, 0.99, 0.05, 2); form.addRow("miniML 阈值", self.p["threshold"])
+        self.p["miniml_pipeline"] = QtWidgets.QComboBox()
+        self.p["miniml_pipeline"].addItems(["标准", "整批滑窗（实验）"])
+        form.addRow("miniML 推理方式", self.p["miniml_pipeline"])
         self.p["deconv_threshold_sd"] = _spin(4, 1, 20, 0.5, 1, "SD"); form.addRow("去卷积阈值", self.p["deconv_threshold_sd"])
         self.p["min_amplitude"] = _spin(0, 0, 1000, 1, 1, "pA"); form.addRow("最小幅度", self.p["min_amplitude"])
         ok, why = detection.miniml_available()
@@ -497,6 +500,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.family_choice.addItems(["EPSC", "IPSC"])
         self.group_by = QtWidgets.QComboBox()
         self.group_by.addItem("组别")
+        self.comparison_plans = {}
+        self.card_button = QtWidgets.QPushButton("设置本次比较（分组树 / 卡片）…")
+        self.card_button.clicked.connect(self.edit_comparison)
         self.an_cdf = QtWidgets.QComboBox()
         self.an_cdf.addItems(["按细胞平均", "等量抽取后合并", "全部事件合并"])
         self.an_cdf.setItemData(0, "推荐：每个细胞权重相同", Qt.ToolTipRole)
@@ -522,6 +528,11 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.addWidget(b, 0, 4, 1, 2)
         grid.addWidget(QtWidgets.QLabel("二级：实验组来源"), 2, 4)
         grid.addWidget(self.group_by, 2, 5)
+        grid.addWidget(self.card_button, 3, 0, 1, 4)
+        self.plan_status = QtWidgets.QLabel("使用原始标签")
+        grid.addWidget(self.plan_status, 3, 4, 1, 2)
+        self.family_choice.currentTextChanged.connect(self.update_plan_status)
+        self.group_by.currentTextChanged.connect(self.update_plan_status)
         grid.addWidget(self.clear_button("清除当前分析结果", "analysis"), 1, 4, 1, 2)
         grid.setColumnStretch(1, 3); grid.setColumnStretch(3, 2)
         for cb in (self.an, self.an_metric, self.an_cdf, self.family_choice):
@@ -1059,6 +1070,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return out
 
     def write_params(self, params):
+        params = {"miniml_pipeline":"标准", **params}
         for k, wd in self.p.items():
             if k not in params:
                 continue
@@ -1187,7 +1199,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def apply_selected(self):
         params = self.read_params()
-        cells = [cell for cell in self.selected_cells() if any(cell.params[key] != value for key, value in params.items())]
+        cells = [cell for cell in self.selected_cells() if any(cell.params.get(key, "标准") != value for key, value in params.items())]
         if not cells:
             self.statusBar().showMessage("未选中记录，或所选记录已使用这些参数。")
             return
@@ -1553,12 +1565,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self.run_bg(job, done, "正在聚类 …")
 
     # ================================================================ 分析
+    def update_plan_status(self):
+        key = (self.family_choice.currentText(), self.group_by.currentText())
+        self.plan_status.setText("已应用卡片方案" if key in self.comparison_plans else "使用原始标签")
+
+    def base_group(self, cell):
+        level = self.group_by.currentIndex()
+        return cell.group.strip() if level <= 0 else (cell.folders[level-1].strip() if level <= len(cell.folders) else "")
+
+    def edit_comparison(self):
+        from .group_cards import GroupBoard
+        cells = [cell for cell in self.project.cells if cell.events is not None and not cell.failure]
+        source = self.group_by.currentText()
+        plans = {family: plan for (family, criterion), plan in self.comparison_plans.items() if criterion == source}
+        board = GroupBoard(self, cells, self.family_choice.currentText(), {c.name:self.base_group(c) for c in cells}, plans)
+        if board.exec():
+            self.comparison_plans[board.family,source] = board.mapping(), board.decisions.get(board.family, 0)
+            self.family_choice.setCurrentText(board.family)
+            self.update_plan_status()
+        board.deleteLater()
+
     def run_analysis(self):
         from ..core.design import metric_figure
         index = self.an.currentIndex()
         family = self.family_choice.currentText()
-        criterion = self.group_by.currentIndex()
         grouping = self.group_by.currentText()
+        mapping, decision = self.comparison_plans.get((family, grouping), (None, 0))
         metric = self.an_metric.currentText()
         mode = ["cell_average", "pooled_equal", "pooled_all"][self.an_cdf.currentIndex()]
         grouped = Project()
@@ -1566,10 +1598,22 @@ class MainWindow(QtWidgets.QMainWindow):
         for cell in self.project.cells:
             if cell.events is None or cell.failure or cell.family() != family:
                 continue
-            label = cell.group if criterion == 0 else (cell.folders[criterion-1] if len(cell.folders) >= criterion else "")
+            label = self.base_group(cell) if mapping is None else mapping.get(cell.name, "")
             if label.strip():
-                grouped.cells.append(replace(cell, group=label.strip()))
+                animal = cell.animal
+                if decision == 2 and animal.strip():
+                    animal = repr((label.strip(), animal.strip()))
+                grouped.cells.append(replace(cell, group=label.strip(), animal=animal))
                 members.append(cell)
+        if mapping is None or not decision:
+            animal_groups = {}
+            for cell in grouped.cells:
+                if cell.animal.strip():
+                    animal_groups.setdefault(cell.animal.strip(), set()).add(cell.group)
+            if any(len(groups) > 1 for groups in animal_groups.values()):
+                self.an_panel.clear_result()
+                self.an_panel.text.setPlainText("发现跨组重复动物编号。请先打开「设置本次比较」确认是同一动物还是各组独立编号。")
+                return
         if len({cell.group for cell in grouped.cells}) < 2:
             self.an_panel.clear_result()
             self.an_panel.text.setPlainText(f"{family} 内需要至少两个有检测结果的非空实验组（如 WT、KO）；请核对「{grouping}」。")
@@ -1586,7 +1630,7 @@ class MainWindow(QtWidgets.QMainWindow):
             fig, text = out
             text = f"一级：{family}；二级：{grouping}；纳入 {len(members)} 条记录。\n" + text
             self.an_panel.show_result(fig, text)
-            self.archive_result(fig, text, dict(analysis=self.ANALYSES[index], family=family, grouping=grouping,
+            self.archive_result(fig, text, dict(analysis=self.ANALYSES[index], family=family, grouping=grouping, card_plan=mapping is not None, animal_identity=decision,
                 group_labels={cell.name:cell.group for cell in grouped.cells}, analysis_members=sorted(cell.name for cell in self.project.cells),
                 metric=metric, cdf_mode=mode), members)
         self.run_bg(job, done, f"正在运行：{family} · {self.an.currentText()} …")
@@ -1616,6 +1660,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("已导出：" + "，".join(os.path.basename(f) for f in files))
 
     def release_project_resources(self):
+        self.comparison_plans.clear()
+        self.update_plan_status()
         detection.clear_model_cache()
         self.task_timer.stop()
         self.current = self.qc_result_cell = self.last_error = None
