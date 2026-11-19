@@ -1,9 +1,8 @@
-"""主窗口：文件列表 + 五个功能页（记录与检测 / 事件审核 / 去卷积平滑 / 动力学聚类 / 分析与统计）。"""
+"""主窗口：文件列表 + 四个功能页（记录与检测 / 事件审核 / 去卷积平滑 / 动力学聚类）。"""
 from __future__ import annotations
 
 import os
 import csv
-from dataclasses import replace
 import gc
 import threading
 import traceback
@@ -93,13 +92,13 @@ class ZoomCanvas(FigureCanvasQTAgg):
 class FigurePanel(QtWidgets.QWidget):
     """matplotlib 图 + 文字结果 + 导出按钮。"""
 
-    def __init__(self, parent=None, *, comparison=False):
+    def __init__(self, parent=None):
         super().__init__(parent)
         self.fig = None
         self.canvas = None
         self.export_folder = Path.cwd()
         lay = QtWidgets.QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0)
-        self.tabs = QtWidgets.QTabWidget() if comparison else None
+        self.split = QtWidgets.QSplitter(Qt.Vertical)
         self.holder = QtWidgets.QWidget(); self.hl = QtWidgets.QVBoxLayout(self.holder)
         self.hl.setContentsMargins(0, 0, 0, 0)
         self.scroll = QtWidgets.QScrollArea(); self.scroll.setWidgetResizable(True)
@@ -108,19 +107,9 @@ class FigurePanel(QtWidgets.QWidget):
         mono = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)   # 表格类结果按列对齐
         mono.setPointSize(QtWidgets.QApplication.font().pointSize())
         self.text.setFont(mono)
-        if self.tabs is not None:
-            self.members = QtWidgets.QTreeWidget()
-            self.members.setRootIsDecorated(False)
-            self.members.setHeaderLabels(["记录", "实验组", "动物编号"])
-            self.tabs.addTab(self.scroll, "图形")
-            self.tabs.addTab(self.text, "统计结果")
-            self.tabs.addTab(self.members, "纳入记录")
-            lay.addWidget(self.tabs)
-        else:
-            self.split = QtWidgets.QSplitter(Qt.Vertical)
-            self.split.addWidget(self.scroll); self.split.addWidget(self.text)
-            self.split.setStretchFactor(0, 3); self.split.setStretchFactor(1, 1)
-            lay.addWidget(self.split)
+        self.split.addWidget(self.scroll); self.split.addWidget(self.text)
+        self.split.setStretchFactor(0, 3); self.split.setStretchFactor(1, 1)
+        lay.addWidget(self.split)
         row = QtWidgets.QHBoxLayout()
         b1 = QtWidgets.QPushButton("导出图（PDF/SVG/PNG）"); b1.clicked.connect(self.export_fig)
         b2 = QtWidgets.QPushButton("复制结果文字"); b2.clicked.connect(
@@ -133,18 +122,13 @@ class FigurePanel(QtWidgets.QWidget):
             self.hl.removeWidget(self.canvas); self.canvas.setParent(None); self.canvas.deleteLater()
         self.canvas = self.fig = None
         self.text.clear()
-        if self.tabs is not None:
-            self.members.clear()
-            self.tabs.setCurrentWidget(self.text)
 
     def show_result(self, fig, text=""):
         self.clear_result()
         self.fig = fig
         self.canvas = ZoomCanvas(fig)
         self.hl.addWidget(self.canvas)
-        if self.tabs is not None:
-            self.tabs.setCurrentWidget(self.scroll)
-        elif self.split.sizes()[0] < 300:
+        if self.split.sizes()[0] < 300:
             self.split.setSizes([640, 240])
         self.canvas.draw_idle()
         self.text.setPlainText(text)
@@ -178,7 +162,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current: CellSession | None = None
         self.workers: list[Worker] = []
         self.deconv_res = None
-        self.qc_result_cell = None
         self.last_error = None
         self.settings = QtCore.QSettings("PatchClampAnalysis", "PatchClampAnalysis")
         self._build_menu()
@@ -318,7 +301,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self._tab_events(), "② 事件审核")
         self.tabs.addTab(self._tab_deconv(), "③ 去卷积平滑")
         self.tabs.addTab(self._tab_cluster(), "④ 动力学聚类")
-        self.tabs.addTab(self._tab_analysis(), "⑤ 分析与统计")
         for plot in (self.p_trace, self.p_det, self.p_ev, self.p_avg, self.pd1, self.pd2, self.pd3):
             plot_menu(plot)
         self.progress = QtWidgets.QProgressBar()
@@ -405,6 +387,9 @@ class MainWindow(QtWidgets.QMainWindow):
             button = QtWidgets.QPushButton(label)
             button.clicked.connect(callback)
             form.addRow(button)
+        export = QtWidgets.QPushButton("导出原始轨迹片段（CSV）…")
+        export.clicked.connect(self.export_trace_segment)
+        form.addRow(export)
         self.c_det = self.p_det.plot(pen=pg.mkPen("#4C72B0"))
         self.thr_line = pg.InfiniteLine(angle=0, pen=pg.mkPen("#C44E52", style=Qt.DashLine)); self.p_det.addItem(self.thr_line)
         return self.split_controls(form_w, self.glw)
@@ -503,68 +488,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def set_ui_points(self, points):
         points = max(7, min(20, points))
         font = self.font(); font.setPointSize(points); self.setFont(font)
-        for panel in (self.cluster_panel, self.an_panel):
-            mono = panel.text.font(); mono.setPointSize(points); panel.text.setFont(mono)
+        mono = self.cluster_panel.text.font(); mono.setPointSize(points); self.cluster_panel.text.setFont(mono)
         self.settings.setValue("ui/points", points)
-
-    ANALYSES = ["事件指标组间比较", "累积概率分布（幅度 / IEI）"]
-
-    def _tab_analysis(self):
-        w = QtWidgets.QWidget(); v = QtWidgets.QVBoxLayout(w)
-        controls = QtWidgets.QWidget()
-        self.an = QtWidgets.QComboBox(); self.an.addItems(self.ANALYSES)
-        self.an_metric = QtWidgets.QComboBox()
-        self.an_metric.addItems(["frequency"] + [f"{f}_{s}" for f in FEATURES for s in ("median", "mean")]
-                                + ["iei_median"])
-        self.an_metric.setCurrentText("amplitude_median")
-        self.family_choice = QtWidgets.QComboBox()
-        self.family_choice.addItems(["EPSC", "IPSC"])
-        self.group_by = QtWidgets.QComboBox()
-        self.group_by.addItem("组别")
-        self.comparison_plans = {}
-        self.card_button = QtWidgets.QPushButton("设置本次比较（分组树 / 卡片）…")
-        self.card_button.clicked.connect(self.edit_comparison)
-        self.an_cdf = QtWidgets.QComboBox()
-        self.an_cdf.addItems(["按细胞平均", "等量抽取后合并", "全部事件合并"])
-        self.an_cdf.setItemData(0, "推荐：每个细胞权重相同", Qt.ToolTipRole)
-        # 下拉框按“最短可读长度”定宽，长选项在展开的列表里完整显示（避免把窗口撑宽）
-        for cb, n in ((self.an, 22), (self.an_metric, 14), (self.an_cdf, 8)):
-            cb.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
-            cb.setMinimumContentsLength(n)
-            cb.view().setMinimumWidth(cb.view().sizeHintForColumn(0) + 30)
-            cb.setToolTip("当前：" + cb.currentText())
-            cb.currentTextChanged.connect(lambda t, c=cb: c.setToolTip("当前：" + t))
-        b = QtWidgets.QPushButton("运行"); b.clicked.connect(self.run_analysis)
-        # 两行排布，窄屏（1280 宽、150% 缩放）也不会把控件挤出窗口
-        grid = QtWidgets.QGridLayout(); grid.setHorizontalSpacing(8)
-        grid.addWidget(QtWidgets.QLabel("分析"), 0, 0, Qt.AlignRight)
-        cells = [[],
-                 [("组间指标", self.an_metric), ("累积分布画法", self.an_cdf)],
-                 [("一级：事件类型", self.family_choice)]]
-        for r_, items in enumerate(cells):
-            for c_, (lab, wd) in enumerate(items):
-                grid.addWidget(QtWidgets.QLabel(lab), r_, 2 * c_, Qt.AlignRight)
-                grid.addWidget(wd, r_, 2 * c_ + 1)
-        grid.addWidget(self.an, 0, 1, 1, 3)
-        grid.addWidget(b, 0, 4, 1, 2)
-        grid.addWidget(QtWidgets.QLabel("二级：实验组来源"), 2, 4)
-        grid.addWidget(self.group_by, 2, 5)
-        grid.addWidget(self.card_button, 3, 0, 1, 4)
-        self.plan_status = QtWidgets.QLabel("使用原始标签")
-        grid.addWidget(self.plan_status, 3, 4, 1, 2)
-        self.family_choice.currentTextChanged.connect(self.update_plan_status)
-        self.group_by.currentTextChanged.connect(self.update_plan_status)
-        grid.addWidget(self.clear_button("清除当前分析结果", "analysis"), 1, 4, 1, 2)
-        grid.setColumnStretch(1, 3); grid.setColumnStretch(3, 2)
-        for cb in (self.an, self.an_metric, self.an_cdf, self.family_choice):
-            cb.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-        controls.setLayout(grid)
-        scroll = QtWidgets.QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(controls)
-        scroll.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustToContents)
-        scroll.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Maximum)
-        v.addWidget(scroll)
-        self.an_panel = FigurePanel(comparison=True); v.addWidget(self.an_panel, 1)
-        return w
 
     def clear_button(self, label, action):
         button = QtWidgets.QPushButton(label)
@@ -584,17 +509,16 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         pooled = action == "batch" or (action == "cluster" and self.c["scope"].currentIndex() == 1)
         cells = self.project.cells if pooled else ([self.current] if self.current else [])
-        if not cells and action != "analysis":
+        if not cells:
             return
         scope = f"全部 {len(cells)} 个细胞" if pooled else (self.current.name if cells else "")
         effects = {"preprocess": "清除预处理、检测、审核、质控和聚类结果", "detect": "清除检测、审核、质控和聚类结果，保留预处理",
                    "batch": "清除检测、审核、质控和聚类结果，保留预处理", "review": "恢复所有被排除的事件，并清除该细胞的旧聚类和检测质控",
                    "cluster": "删除簇标签，保留检测和审核", "deconv": "清除去卷积图和结果，保留已采用的检测结果"}
-        if action != "analysis":
-            answer = QtWidgets.QMessageBox.question(self, "确认清除", f"{scope}：{effects[action]}。\n保留原始记录和参数。继续吗？",
-                                                   QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
-            if answer != QtWidgets.QMessageBox.Yes:
-                return
+        answer = QtWidgets.QMessageBox.question(self, "确认清除", f"{scope}：{effects[action]}。\n保留原始记录和参数。继续吗？",
+                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
         if action in ("preprocess", "detect", "batch"):
             for cell in cells:
                 cell.clear_detection(preprocessing=action == "preprocess")
@@ -608,13 +532,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if action in ("deconv", "preprocess", "detect", "batch"):
             self.clear_deconv_view()
         if action != "deconv":
-            if action == "analysis" and self.qc_result_cell is not None:
-                self.qc_result_cell.clear_qc_results()
-            self.qc_result_cell = None
-            self.an_panel.clear_result()
-            if action != "analysis":
-                self.cluster_panel.clear_result(); self.cluster_msg.clear()
-                self.refresh_cells(); self.refresh_trace(); self.refresh_events()
+            self.cluster_panel.clear_result(); self.cluster_msg.clear()
+            self.refresh_cells(); self.refresh_trace(); self.refresh_events()
         self.dirty = True
         if action in ("preprocess", "detect", "batch", "review", "cluster") and not self.save_session():
             return
@@ -658,14 +577,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project_lock = lock
         self.release_project_resources()
         self.project, self.project_root, self.current = project, root, None
-        for panel in (self.cluster_panel, self.an_panel):
-            panel.export_folder = root / "results"
-        self.dirty = False; self.qc_result_cell = None
+        self.cluster_panel.export_folder = root / "results"
+        self.dirty = False
         self.workspace.setCurrentIndex(1); self.cell_dock.show(); self.tabs.setCurrentIndex(0)
         for action in self.project_actions:
             action.setEnabled(True)
         self.cell_table.clearSelection(); self.cell_table.setCurrentCell(-1, -1)
-        self.clear_deconv_view(); self.cluster_panel.clear_result(); self.an_panel.clear_result(); self.cluster_msg.clear()
+        self.clear_deconv_view(); self.cluster_panel.clear_result(); self.cluster_msg.clear()
         self.write_params(DEFAULT_PARAMS)
         if not self.miniml_ok:
             self.p["detector"].setCurrentText("去卷积")
@@ -912,11 +830,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 table.setHorizontalHeaderItem(8 + level, QtWidgets.QTableWidgetItem(f"目录 {level+1}"))
                 header = table.horizontalHeader()
                 header.moveSection(header.visualIndex(8+level), header.visualIndex(1)+1+level)
-        labels = ["组别", *(f"目录 {index+1}" for index in range(depth))]
-        if self.group_by.count() != len(labels):
-            previous = self.group_by.currentText()
-            self.group_by.clear(); self.group_by.addItems(labels)
-            self.group_by.setCurrentText(previous)
         self.cell_table.setRowCount(len(self.project.cells))
         for i, c in enumerate(self.project.cells):
             for index in range(depth):
@@ -1234,7 +1147,6 @@ class MainWindow(QtWidgets.QMainWindow):
             cell.clear_detection(preprocessing=True); cell.params.update(params)
             cell.event_family = cell.family() if not old_family else old_family
         self.dirty = True; self.clear_deconv_view(); self.cluster_panel.clear_result(); self.cluster_msg.clear()
-        self.an_panel.clear_result(); self.qc_result_cell = None
         self.refresh_cells(); self.refresh_trace(); self.refresh_events()
         self.statusBar().showMessage(f"已向 {len(cells)} 条选中记录应用参数；可开始检测。")
 
@@ -1354,7 +1266,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.current.accept_manual(candidate)
             self.dirty = True
             self.manual_region.hide()
-            self.cluster_panel.clear_result(); self.an_panel.clear_result()
+            self.cluster_panel.clear_result()
             self._detected("已补录一个事件，可在审核页排除或恢复。")
 
     def refresh_trace(self, reset=False):
@@ -1573,8 +1485,7 @@ class MainWindow(QtWidgets.QMainWindow):
                        "各簇中位数：", summ.round(3).to_string(index=False, col_space=7), "",
                        "解读线索：", "· 幅度贴近噪声、衰减极短或电荷为负的一簇多半是误检的噪声，可在“事件审核”中按簇排序后排除，或提高检测阈值；",
                        "· 上升慢、衰减慢且幅度小的一簇 → 远端树突输入（电紧张滤波），可用“上升时间–幅度相关”佐证；",
-                       "· 上升相近但衰减明显不同 → 受体亚基/类型不同（如 GluA2 缺失的快 AMPAR、含 NMDA 成分的慢 EPSC；α1 与 α2/3/5 型 GABA_A 受体），或不同来源的中间神经元（PV 胞体周围快 IPSC vs SST 树突慢 IPSC）；",
-                       "· 做“全部细胞合并”聚类后，到“分析与统计 → 各簇组成的组间比较”检验处理是否选择性改变某一类输入。"]
+                       "· 上升相近但衰减明显不同 → 受体亚基/类型不同（如 GluA2 缺失的快 AMPAR、含 NMDA 成分的慢 EPSC；α1 与 α2/3/5 型 GABA_A 受体），或不同来源的中间神经元（PV 胞体周围快 IPSC vs SST 树突慢 IPSC）。"]
                 self.cluster_panel.show_result(fig, "\n".join(txt))
             self.refresh_trace(); self.refresh_events()
             if res.k < 1:
@@ -1587,80 +1498,45 @@ class MainWindow(QtWidgets.QMainWindow):
         self.run_bg(job, done, "正在聚类 …")
 
     # ================================================================ 分析
-    def update_plan_status(self):
-        key = (self.family_choice.currentText(), self.group_by.currentText())
-        self.plan_status.setText("已应用卡片方案" if key in self.comparison_plans else "使用原始标签")
-
-    def base_group(self, cell):
-        level = self.group_by.currentIndex()
-        return cell.group.strip() if level <= 0 else (cell.folders[level-1].strip() if level <= len(cell.folders) else "")
-
-    def edit_comparison(self):
-        from .group_cards import GroupBoard
-        cells = [cell for cell in self.project.cells if cell.events is not None and not cell.failure]
-        source = self.group_by.currentText()
-        plans = {family: plan for (family, criterion), plan in self.comparison_plans.items() if criterion == source}
-        board = GroupBoard(self, cells, self.family_choice.currentText(), {c.name:self.base_group(c) for c in cells}, plans)
-        if board.exec():
-            self.comparison_plans[board.family,source] = board.mapping(), board.decisions.get(board.family, 0)
-            self.family_choice.setCurrentText(board.family)
-            self.update_plan_status()
-        board.deleteLater()
-
-    def run_analysis(self):
-        from ..core.design import metric_figure
-        index = self.an.currentIndex()
-        family = self.family_choice.currentText()
-        grouping = self.group_by.currentText()
-        mapping, decision = self.comparison_plans.get((family, grouping), (None, 0))
-        metric = self.an_metric.currentText()
-        mode = ["cell_average", "pooled_equal", "pooled_all"][self.an_cdf.currentIndex()]
-        grouped = Project()
-        members = []
-        for cell in self.project.cells:
-            if cell.events is None or cell.failure or cell.family() != family:
-                continue
-            label = self.base_group(cell) if mapping is None else mapping.get(cell.name, "")
-            if label.strip():
-                animal = cell.animal
-                if decision == 2 and animal.strip():
-                    animal = repr((label.strip(), animal.strip()))
-                grouped.cells.append(replace(cell, group=label.strip(), animal=animal))
-                members.append(cell)
-        if mapping is None or not decision:
-            animal_groups = {}
-            for cell in grouped.cells:
-                if cell.animal.strip():
-                    animal_groups.setdefault(cell.animal.strip(), set()).add(cell.group)
-            if any(len(groups) > 1 for groups in animal_groups.values()):
-                self.an_panel.clear_result()
-                self.an_panel.text.setPlainText("发现跨组重复动物编号。请先打开「设置本次比较」确认是同一动物还是各组独立编号。")
-                return
-        if len({cell.group for cell in grouped.cells}) < 2:
-            self.an_panel.clear_result()
-            self.an_panel.text.setPlainText(f"{family} 内需要至少两个有检测结果的非空实验组（如 WT、KO）；请核对「{grouping}」。")
+    def export_trace_segment(self):
+        if self.current is None:
+            self.statusBar().showMessage("请先选择一条记录。")
             return
+        rec = self.current.rec
+        low, high = self.manual_region.getRegion() if self.manual_region.isVisible() else self.p_trace.viewRange()[0]
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("导出原始轨迹片段")
+        layout = QtWidgets.QFormLayout(dialog)
+        layout.addRow(QtWidgets.QLabel(f"{rec.name}  ·  {rec.fs:g} Hz  ·  {rec.unit}"))
+        fields = []
+        for label, value in (("起点（秒，含）", low), ("终点（秒，不含）", high)):
+            field = QtWidgets.QDoubleSpinBox()
+            field.setDecimals(12)
+            field.setRange(0, rec.duration)
+            field.setSingleStep(1 / rec.fs)
+            field.setValue(value)
+            layout.addRow(label, field)
+            fields.append(field)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+        if not dialog.exec():
+            return
+        start, end = (field.value() for field in fields)
+        try:
+            first, stop = rec.sample_range(start, end)
+        except ValueError as error:
+            QtWidgets.QMessageBox.warning(self, "无法导出", str(error))
+            return
+        name = f"{Path(rec.name).stem}_{first}-{stop}_raw.csv"
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "保存原始采样值",
+            str(self.project_root / "results" / name), "CSV (*.csv)")
+        if path:
+            self.run_bg(lambda: rec.export_samples(path, first, stop),
+                        lambda _: self.statusBar().showMessage(f"已导出 {stop-first} 个原始采样点：{path}"),
+                        "正在导出原始轨迹 …")
 
-        def job():
-            if index == 0:
-                return metric_figure(grouped, metric)
-            if not grouped.analyzed():
-                return plots.new_figure(), "无有效事件，不能绘制 CDF。"
-            return plots.cumulative_figure(grouped, mode=mode, design_aware=True)
-
-        def done(out):
-            fig, text = out
-            text = f"一级：{family}；二级：{grouping}；纳入 {len(members)} 条记录。\n" + text
-            self.an_panel.show_result(fig, text)
-            for cell, original in zip(grouped.cells, members):
-                QtWidgets.QTreeWidgetItem(self.an_panel.members, [original.name, cell.group, original.animal])
-            self.an_panel.members.resizeColumnToContents(0)
-            self.archive_result(fig, text, dict(analysis=self.ANALYSES[index], family=family, grouping=grouping, card_plan=mapping is not None, animal_identity=decision,
-                group_labels={cell.name:cell.group for cell in grouped.cells}, analysis_members=sorted(cell.name for cell in self.project.cells),
-                metric=metric, cdf_mode=mode), members)
-        self.run_bg(job, done, f"正在运行：{family} · {self.an.currentText()} …")
-
-    # ================================================================ 导出
     def export_review_summary(self):
         if not any(cell.events is not None for cell in self.project.cells):
             QtWidgets.QMessageBox.information(self, "审核后统计", "尚无已检测的记录。")
@@ -1685,16 +1561,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("已导出：" + "，".join(os.path.basename(f) for f in files))
 
     def release_project_resources(self):
-        self.comparison_plans.clear()
-        self.update_plan_status()
         detection.clear_model_cache()
         self.task_timer.stop()
-        self.current = self.qc_result_cell = self.last_error = None
+        self.current = self.last_error = None
         self.project = Project()
         self.project_root = None
         self.clear_deconv_view()
         self.cluster_panel.clear_result()
-        self.an_panel.clear_result()
         self.refresh_trace()
         self.refresh_events()
         self.refresh_cells()

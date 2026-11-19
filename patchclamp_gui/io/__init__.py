@@ -1,6 +1,10 @@
 """数据读取：Axon ABF（pyabf）、HDF5，以及用于演示/测试的模拟数据。"""
 from __future__ import annotations
 
+import csv
+import os
+from bisect import bisect_left
+from tempfile import NamedTemporaryFile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,6 +28,38 @@ class Recording:
     @property
     def time(self) -> np.ndarray:
         return np.arange(len(self.data)) / self.fs
+
+    def sample_range(self, start: float, end: float) -> tuple[int, int]:
+        """Return samples whose trace times fall in [start, end)."""
+        indices = range(len(self.data))
+        def time_at(i):
+            return i / self.fs
+        first = bisect_left(indices, start, key=time_at)
+        stop = bisect_left(indices, end, key=time_at)
+        if first >= stop:
+            raise ValueError("所选时间段没有采样点，请调整起点或终点。")
+        return first, stop
+
+    def export_samples(self, path, first: int, stop: int):
+        if not 0 <= first < stop <= len(self.data):
+            raise ValueError("采样范围超出记录。")
+        temporary = None
+        try:
+            with NamedTemporaryFile(mode="w", dir=Path(path).parent, delete=False,
+                                    encoding="utf-8-sig", newline="") as stream:
+                temporary = Path(stream.name)
+                csv.writer(stream).writerow(["sample_index", "time_s", "relative_time_s",
+                                             f"signal_{self.unit}" if self.unit else "signal"])
+                for begin in range(first, stop, 65536):
+                    end = min(begin + 65536, stop)
+                    indices = np.arange(begin, end)
+                    values = np.column_stack((indices, indices / self.fs,
+                                              (indices - first) / self.fs, self.data[begin:end]))
+                    np.savetxt(stream, values, delimiter=",", fmt=["%d", "%.17g", "%.17g", "%.17g"])
+            os.replace(temporary, path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
 
 def abf_info(path: str) -> dict:

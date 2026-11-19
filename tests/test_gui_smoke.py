@@ -55,10 +55,7 @@ def test_gui_full_workflow(monkeypatch, tmp_path):
     assert w.deconv_res is not None and len(w.deconv_res.peaks) > 50
     w.c["scope"].setCurrentIndex(1); w.run_cluster(); wait()
     assert w.cluster_panel.fig is not None
-    for i in range(len(w.ANALYSES)):
-        w.an.setCurrentIndex(i); w.run_analysis(); wait()
-        assert w.an_panel.fig is not None and w.an_panel.text.toPlainText()
-    assert len(list((w.project_root / "results").glob("*/figure.png"))) == len(w.ANALYSES) + 1
+    assert len(list((w.project_root / "results").glob("*/figure.png"))) == 1
     assert len(list((w.project_root / "results").glob("*/data.npz"))) == 2
     monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *args: QtWidgets.QMessageBox.No)
     w.clear_results("batch")
@@ -66,8 +63,6 @@ def test_gui_full_workflow(monkeypatch, tmp_path):
     monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *args: QtWidgets.QMessageBox.Yes)
     other = w.project.cells[1]
     raw, params = w.current.rec, w.read_params()
-    w.clear_results("analysis")
-    assert w.an_panel.fig is None and not w.an_panel.text.toPlainText()
     w.clear_results("deconv")
     assert w.deconv_res is None and not w.deconv_info.text()
     w.clear_results("cluster")
@@ -249,9 +244,28 @@ def test_directory_columns_and_vector_export(tmp_path, monkeypatch):
     source = tmp_path / "input.npy"
     np.save(source, np.arange(1000))
     window.add_files([str(source)], levels={str(source): ["WT", "positive"]})
-    assert window.group_by.itemText(2) == "目录 2"
+    assert window.cell_table.horizontalHeaderItem(9).text() == "目录 2"
     window.cell_table.item(0, 9).setText("negative")
     assert window.current.folders == ["WT", "negative"]
+    assert window.tabs.count() == 4 and window.current.events is None
+    segment = tmp_path / "trace.csv"
+    def choose_range(dialog):
+        start, end = dialog.findChildren(QtWidgets.QDoubleSpinBox)
+        start.setValue(10 / window.current.rec.fs)
+        end.setValue(13 / window.current.rec.fs)
+        return QtWidgets.QDialog.Accepted
+    monkeypatch.setattr(QtWidgets.QDialog, "exec", choose_range)
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", lambda *args: (str(segment), ""))
+    window.export_trace_segment()
+    import time
+    while window.workers:
+        app.processEvents()
+        time.sleep(.01)
+    assert window.last_error is None
+    data = np.loadtxt(segment, delimiter=",", encoding="utf-8-sig", skiprows=1)
+    np.testing.assert_array_equal(data[:, 0], [10, 11, 12])
+    np.testing.assert_array_equal(data[:, 3], window.current.rec.data[10:13])
+    np.testing.assert_allclose(data[:, 2], np.arange(3) / window.current.rec.fs)
     target = tmp_path / "wave.svg"
     monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
     window.show(); app.processEvents()

@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from patchclamp_gui import io
-from patchclamp_gui.core import clustering, deconv, detection, stats, temporal, validation
+from patchclamp_gui.core import clustering, deconv, detection, temporal, validation
 from patchclamp_gui.core.session import CellSession, Project
 
 
@@ -109,14 +109,7 @@ def test_temporal_poisson_vs_bursty():
     assert ac["ratio"][0] > ac["hi"][0]
 
 
-def test_scaling_multiplicative():
-    rng = np.random.default_rng(1)
-    c = rng.lognormal(2.8, 0.4, 2000)
-    r = stats.scaling_analysis(c, rng.lognormal(2.8, 0.4, 2000) * 1.3, n=800)
-    assert abs(r["iterative_factor"] - 1.3) < 0.08 and r["multiplicative"]
-
-
-def test_group_stats_and_export(tmp_path):
+def test_event_and_cell_export(tmp_path):
     proj = Project()
     for i in range(6):
         pops = [dict(frac=1.0, amp=15 if i < 3 else 24, amp_cv=0.3, tau_rise=0.4, tau_decay=4.0)]
@@ -124,17 +117,6 @@ def test_group_stats_and_export(tmp_path):
                         group="ctrl" if i < 3 else "trt", animal=f"m{i}")
         c.params.update(detector="deconvolution"); c.run_detection()
         proj.cells.append(c)
-    res = stats.compare_groups(proj.cell_table(), "amplitude_median")
-    assert res["p"] < 0.05 and res["n"] == [3, 3]
-    hb = stats.hierarchical_bootstrap(proj.events_table(), "amplitude", n_boot=200)
-    assert hb["p_two_sided"] < 0.05
-    lm = stats.event_level_lmm(proj.events_table(), "amplitude")
-    assert lm["p"] < 0.01 and 1.3 < list(lm["fold_change"].values())[0] < 2.0
-    from patchclamp_gui.core import plots
-    for mode in ("cell_average", "pooled_equal", "pooled_all"):
-        fig, txt = plots.cumulative_figure(proj, mode=mode)
-        assert len(fig.axes) == 2 and "p =" in txt
-    fig.savefig(tmp_path / "cdf.pdf")
     files = proj.export(str(tmp_path / "out"))
     assert all((tmp_path / f.split("/")[-1]).exists() for f in files)
 
