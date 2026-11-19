@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import csv
+import gc
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -51,6 +52,8 @@ class Worker(QtCore.QThread):
             self.done.emit(self.fn(self.advanced.emit) if self.tracked else self.fn())
         except Exception:
             self.failed.emit(traceback.format_exc())
+        finally:
+            self.fn = None
 
 
 def _spin(val, lo, hi, step=1.0, dec=2, suffix=""):
@@ -579,6 +582,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.project_lock is not None and lock is not self.project_lock:
             self.project_lock.unlock()
         self.project_lock = lock
+        self.release_project_resources()
         self.project, self.project_root, self.current = project, root, None
         for panel in (self.cluster_panel, self.an_panel):
             panel.export_folder = root / "results"
@@ -925,6 +929,7 @@ class MainWindow(QtWidgets.QMainWindow):
             box.setDetailedText(tb); box.exec()
 
         wk.done.connect(finish); wk.failed.connect(fail)
+        wk.finished.connect(wk.deleteLater)
         wk.start()
         return wk
 
@@ -1282,6 +1287,19 @@ class MainWindow(QtWidgets.QMainWindow):
             files = self.project.export(stem)
             self.statusBar().showMessage("已导出：" + "，".join(os.path.basename(f) for f in files))
 
+    def release_project_resources(self):
+        self.task_timer.stop()
+        self.current = self.qc_result_cell = self.last_error = None
+        self.project = Project()
+        self.project_root = None
+        self.clear_deconv_view()
+        self.cluster_panel.clear_result()
+        self.an_panel.clear_result()
+        self.refresh_trace()
+        self.refresh_events()
+        self.refresh_cells()
+        gc.collect()
+
     def closeEvent(self, e):
         if self.workers:
             self.statusBar().showMessage("请在后台任务结束后关闭。")
@@ -1292,4 +1310,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 e.ignore(); return
         if self.project_lock is not None:
             self.project_lock.unlock(); self.project_lock = None
+        self.release_project_resources()
+        self.dirty = False
         super().closeEvent(e)

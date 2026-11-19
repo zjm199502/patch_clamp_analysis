@@ -168,3 +168,33 @@ def test_cancel_paused_batch(tmp_path):
     assert not window.workers and completed == [True]
     assert "已取消" in window.statusBar().currentMessage()
     window.close()
+
+
+def test_project_resource_lifetime(tmp_path):
+    import time
+    import weakref
+    import numpy as np
+    from PySide6 import QtCore
+    from patchclamp_gui.gui.main_window import MainWindow, Worker
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow()
+    source = tmp_path / "sample.npy"
+    np.save(source, np.zeros(20000))
+    for index in range(3):
+        assert window.activate_project(tmp_path / str(index), create=True)
+        if index:
+            assert cell_ref() is None and buffer_ref() is None
+        window.add_files([str(source)])
+        cell_ref = weakref.ref(window.current)
+        buffer_ref = weakref.ref(window.current.rec.data)
+        window.run_bg(lambda cell=window.current: cell.name, lambda _: None, "test")
+        deadline = time.monotonic() + 5
+        while window.workers and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(.005)
+        app.processEvents()
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        assert not window.findChildren(Worker) and not window.task_timer.isActive()
+    window.close()
+    assert window.project_root is None and window.project_lock is None
+    assert cell_ref() is None and buffer_ref() is None
