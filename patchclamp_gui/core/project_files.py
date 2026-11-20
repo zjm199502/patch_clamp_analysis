@@ -73,7 +73,7 @@ def save_project(root, project, destination=None):
                 if cell.det is not None:
                     det = group.create_group("detection")
                     det.attrs["settings"] = _json(dict(method=cell.det.method, params=cell.det.params, threshold=cell.det.threshold))
-                    for key in ("onsets", "scores", "trace"):
+                    for key in ("onsets", "scores", "trace", "window_scores"):
                         if getattr(cell.det, key) is not None:
                             det.create_dataset(key, data=getattr(cell.det, key))
         os.replace(temporary, destination or root / SNAPSHOT)
@@ -131,6 +131,11 @@ def open_project(root, source=None):
             if "detection" in group:
                 det = group["detection"]
                 cell.det = Detection(**json.loads(det.attrs["settings"]), **{key: det[key][()] for key in det})
+            if cell.detected_signature and cell.events is not None:
+                from .provenance import signature
+                if any(cell.detected_signature == signature(cell, legacy_version=v)
+                       for v in ("0.2.12", "0.2.11", "0.2.10")):
+                    cell.detected_signature = signature(cell)
             project.cells.append(cell)
     return project
 

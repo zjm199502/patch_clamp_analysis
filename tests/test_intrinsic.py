@@ -8,7 +8,7 @@ def test_sweep_review(monkeypatch, tmp_path):
     from PySide6 import QtWidgets
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
     from patchclamp_gui.gui.review import review_sweeps
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     abf = SimpleNamespace(dataRate=1000, sweepX=np.arange(200)/1000, sweepC=np.zeros(200))
     abf.setSweep = lambda index: setattr(abf, "sweepY", np.full(200, -65 + index))
     monkeypatch.setattr(pyabf, "ABF", lambda path: abf)

@@ -38,6 +38,7 @@ class Detection:
     trace: np.ndarray | None = None         # 检测曲线（预测概率 / 去卷积曲线）
     threshold: float | None = None
     params: dict = field(default_factory=dict)
+    window_scores: np.ndarray | None = None
 
 
 def miniml_available() -> tuple[bool, str]:
@@ -68,7 +69,7 @@ def _graph_minmax(window):
 _model_cache = {}
 
 
-def _packed_predict(detector):
+def _packed_predict(detector, progress=None):
     import tensorflow as tf
     from scipy.signal import resample
     data = resample(detector.trace.data, round(len(detector.trace.data) * detector.resampling_factor))
@@ -91,6 +92,8 @@ def _packed_predict(detector):
     for start in range(0, len(windows), detector.batch_size):
         batch = tf.convert_to_tensor(np.ascontiguousarray(windows[start:start+detector.batch_size, :, None]))
         predictions.append(infer(batch).numpy().reshape(-1))
+        if progress:
+            progress(min(start + detector.batch_size, len(windows)), len(windows))
     detector.prediction = tf.convert_to_tensor(np.concatenate(predictions))
 
 
@@ -100,21 +103,23 @@ def clear_model_cache():
 
 def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_ms: float = 30.0,
                   model: str = "GC_lstm_model.h5", threshold: float = 0.5, batch_size: int | None = None,
-                  unit: str = "pA", callbacks: list | None = None, packed=False) -> Detection:
+                  unit: str = "pA", callbacks: list | None = None, packed=False, previous=None, progress=None) -> Detection:
     """调用 miniML 的 EventDetection。
 
     window_ms 应覆盖一个完整事件（约为衰减时间常数的 8–12 倍）；miniML 会把该窗口重采样到
     模型训练时的 600 点，因此同一个模型可用于动力学不同的事件。model 可以是 miniML 自带模型
     的相对路径，也可以是用户迁移学习得到的 .h5 文件的绝对路径。
     """
-    import os
+    import hashlib
     import sys
+    import tensorflow as tf
+    from importlib.metadata import PackageNotFoundError, version
 
     from miniml.core import event
     from miniml.core.trace import MiniTrace
     from miniml.resources.util import get_resource_file_path
 
-    model_path = model if os.path.isabs(model) and os.path.exists(model) \
+    model_path = model if Path(model).is_absolute() \
         else get_resource_file_path(f"models/{model}")
     win = int(round(window_ms / 1e3 * fs))
     if batch_size is None:
@@ -129,8 +134,41 @@ def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_
                          batch_size=batch_size, event_direction=direction,
                          training_direction="negative", compile_model=False, verbose=0,
                          callbacks=callbacks)
-    if packed and not callbacks and hasattr(det, "_EventDetection__predict"):
-        det._EventDetection__predict = lambda: _packed_predict(det)
+    # Include the actual input bytes so edited/replaced traces cannot reuse stale predictions.
+    digest = hashlib.sha256(np.ascontiguousarray(trace.data).view(np.uint8)).hexdigest()
+    try:
+        engine_version = version("miniml-detect")
+    except PackageNotFoundError:  # Frozen installations can omit distribution metadata.
+        engine_version = "bundled"
+    cache_key = [1, digest, fs, unit, direction, win, *key, packed, batch_size,
+                 engine_version, tf.__version__]
+    reuse = (previous is not None and previous.window_scores is not None
+             and previous.params.get("prediction_key") == cache_key and not callbacks)
+    window_scores = None
+    original_predict = getattr(det, "_EventDetection__predict", None)
+    if original_predict is not None:
+        def predict():
+            nonlocal window_scores
+            width = round(det.window_size * det.resampling_factor)
+            step = round(det.stride_length * det.resampling_factor)
+            total = 1 + (round(len(y) * det.resampling_factor) - width) // step
+            if progress:
+                progress(0, total)
+            if reuse and previous.window_scores.shape == (total,):
+                det.prediction = tf.convert_to_tensor(previous.window_scores)
+                if progress:
+                    progress(total, total)
+            elif packed and not callbacks:
+                _packed_predict(det, progress)
+            else:
+                if progress:
+                    class Progress(tf.keras.callbacks.Callback):
+                        def on_predict_batch_end(self, batch, logs=None):
+                            progress(min((batch + 1) * batch_size, total), total)
+                    det.callbacks = [*det.callbacks, Progress()]
+                original_predict()
+            window_scores = np.asarray(det.prediction).reshape(-1)
+        det._EventDetection__predict = predict
     try:
         det.detect_events(eval=False, resample_to_600=True)
     finally:
@@ -142,7 +180,9 @@ def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_
     order = np.argsort(onsets)
     return Detection(onsets=onsets[order], scores=scores[order] if len(scores) == len(onsets) else scores,
                      method="miniML", trace=np.asarray(det.prediction, float), threshold=threshold,
-                     params=dict(model=model, window_ms=window_ms, threshold=threshold, direction=direction, batch_size=batch_size))
+                     window_scores=window_scores,
+                     params=dict(model=model, window_ms=window_ms, threshold=threshold, direction=direction,
+                                 batch_size=batch_size, prediction_key=cache_key))
 
 
 def detect_deconv(y: np.ndarray, fs: float, direction: str = "negative", tau_rise_ms: float = 0.4,

@@ -1,7 +1,7 @@
 """分析会话：一个细胞（记录）一个 CellSession，多个细胞组成 Project。"""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pandas as pd
@@ -65,29 +65,62 @@ class CellSession:
         self.qc["noise_rms"] = preprocess.noise_rms(self.processed)
         return self.processed
 
-    def detector_fn(self):
+    def detector_fn(self, *, previous=None, progress=None):
         """返回 y -> onsets 的函数（供质控模块用同样的参数重复检测）。"""
         p, fs = self.params, self.rec.fs
         if p["detector"] == "miniML":
             packed = p.get("miniml_pipeline") == "整批滑窗（实验）"
             return lambda y: detection.detect_miniml(y, fs, p["direction"], p["window_ms"], p["model"],
                     p["threshold"], batch_size=int(p.get("packed_batch", 128)) if packed else None,
-                    unit=self.rec.unit, packed=packed)
+                    unit=self.rec.unit, packed=packed, previous=previous, progress=progress)
         return lambda y: detection.detect_deconv(y, fs, p["direction"], p["tau_rise_ms"], p["tau_decay_ms"],
                                                  p["deconv_threshold_sd"], p["deconv_smooth_ms"])
 
-    def run_detection(self) -> int:
+    def run_detection(self, progress=None) -> int:
         if self.processed is None:
             self.run_preprocess()
         p = self.params
-        self.det = self.detector_fn()(self.processed)
-        df, w, tw = features.extract_events(self.processed, self.rec.fs, self.det.onsets, p["direction"],
-                                            p["window_ms"], scores=self.det.scores,
+        result = self.detector_fn(previous=self.det, progress=progress)(self.processed)
+        df, w, tw = features.extract_events(self.processed, self.rec.fs, result.onsets, p["direction"],
+                                            p["window_ms"], scores=result.scores,
                                             min_amplitude=p["min_amplitude"])
         df["excluded"] = False
         df["cluster"] = -1
-        self.events, self.waves, self.t_wave = df, w, tw
         from .provenance import signature
+        same_input = False
+        if result.method == "miniML" and self.det is not None and self.det.method == "miniML":
+            old_key = self.det.params.get("prediction_key")
+            if old_key:
+                same_input = result.params.get("prediction_key") == old_key
+            else:
+                # Legacy projects have the result signature but no raw window scores.
+                before = replace(self, params={**p, "threshold": self.det.threshold})
+                same_input = self.detected_signature == signature(before)
+        if same_input and self.events is not None:
+            old = self.events
+            df["excluded"] = df.peak_idx.isin(old.loc[old.excluded.astype(bool), "peak_idx"])
+            if "manual" in old:
+                manual = old.manual.fillna(False).astype(bool).to_numpy()
+                if manual.any():
+                    rows = old.loc[manual].copy()
+                    rows["cluster"] = -1
+                    peaks = np.sort(rows.peak_idx.to_numpy(dtype=int))
+                    radius = max(1, round(.001 * self.rec.fs))
+                    # Keep the curated waveform when the new threshold also finds that peak.
+                    left = np.searchsorted(peaks, df.peak_idx - radius)
+                    right = np.searchsorted(peaks, df.peak_idx + radius, side="right")
+                    keep = left == right
+                    df = df.loc[keep].copy()
+                    df["manual"] = False
+                    df = pd.concat([df, rows], ignore_index=True)
+                    order = np.argsort(df.time_s.to_numpy(), kind="stable")
+                    w = np.concatenate([w[keep], self.waves[manual]])[order]
+                    df = df.iloc[order].reset_index(drop=True)
+                    df["iei"] = df.time_s.diff()
+                    df["inst_freq"] = 1 / df.iei
+        self.det = result
+        self.clear_qc_results()
+        self.events, self.waves, self.t_wave = df, w, tw
         self.detected_signature = signature(self)
         self.failure = ""
         return len(df)

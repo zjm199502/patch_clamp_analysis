@@ -30,6 +30,47 @@ def test_miniml_inference():
     detection.clear_model_cache()
 
 
+@pytest.mark.parametrize("pipeline", ["标准", "整批滑窗（实验）"])
+def test_window_cache_after_reopen(pipeline, tmp_path):
+    from patchclamp_gui.core import project_files
+    from miniml.core.event import EventDetection
+
+    root = tmp_path / "project"
+    project = project_files.create_project(root)
+    cell = CellSession(io.simulate_recording(4, seed=1))
+    cell.params["miniml_pipeline"] = pipeline
+    project.cells.append(cell)
+    progress = []
+    cell.run_detection(lambda cur, total: progress.append((cur, total)))
+    assert progress[0][0] == 0 and progress[-1][0] == progress[-1][1]
+    assert len(progress) > 2
+    project_files.save_project(root, project)
+    loaded = project_files.open_project(root).cells[0]
+    reference = CellSession(cell.rec, params={**cell.params, "threshold": .75})
+    reference.run_detection()
+    loaded.params["threshold"] = .75
+    from unittest.mock import patch
+    with patch.object(EventDetection, "_EventDetection__predict", side_effect=AssertionError("cache miss")), \
+         patch.object(detection, "_packed_predict", side_effect=AssertionError("cache miss")):
+        loaded.run_detection()
+    assert reference.events.equals(loaded.events)
+    np.testing.assert_array_equal(reference.det.trace, loaded.det.trace)
+    np.testing.assert_array_equal(reference.waves, loaded.waves)
+    loaded.events.loc[0, "excluded"] = True
+    loaded.events["manual"] = False
+    loaded.events.loc[0, "manual"] = True
+    peak = loaded.events.peak_idx.iloc[0]
+    loaded.params["threshold"] = .5
+    loaded.run_detection()
+    row = loaded.events.loc[loaded.events.peak_idx == peak]
+    assert len(row) == 1 and row.iloc[0].manual and row.iloc[0].excluded
+    old_key = loaded.det.params["prediction_key"]
+    loaded.params["lowpass_hz"] = 800
+    loaded.run_preprocess()
+    loaded.run_detection()
+    assert loaded.det.params["prediction_key"] != old_key
+
+
 @pytest.fixture(scope="module")
 def cell():
     rec = io.simulate_recording(90, seed=3, noise_sd=1.5)

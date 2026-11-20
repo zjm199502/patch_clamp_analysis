@@ -5,7 +5,7 @@ import pytest
 def test_import_preview(monkeypatch):
     from PySide6 import QtWidgets
     from patchclamp_gui.gui.review import preview_import
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     paths = ["sIPSC/file-EPSC.abf", "sIPSC/other.abf"]
     def inspect(dialog):
         table = dialog.findChild(QtWidgets.QTableWidget)
@@ -50,3 +50,19 @@ def test_manual_recovery_and_freshness(tmp_path):
     assert provenance.status(restored) == "已完成"
     restored.params["window_ms"] += 5
     assert provenance.status(restored) == "待重算"
+
+def test_previous_release_detection_survives_upgrade(tmp_path):
+    root = tmp_path / "legacy"
+    project = project_files.create_project(root)
+    cell = CellSession(io.simulate_recording(3))
+    cell.params["detector"] = "deconvolution"
+    project.cells.append(cell)
+    cell.run_detection()
+    cell.detected_signature = provenance.signature(cell, legacy_version="0.2.12")
+    project_files.save_project(root, project)
+    reopened = project_files.open_project(root).cells[0]
+    assert provenance.status(reopened) == "已完成"
+    reopened.params["threshold"] = .9
+    assert provenance.status(reopened) == "已完成"
+    reopened.params["lowpass_hz"] = 850
+    assert provenance.status(reopened) == "待重算"

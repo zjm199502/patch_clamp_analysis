@@ -141,7 +141,6 @@ def test_import_subset_and_reopen(tmp_path, monkeypatch):
 def test_cancel_paused_batch(tmp_path):
     import threading
     import time
-    from types import SimpleNamespace
     from patchclamp_gui.gui.main_window import MainWindow
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = MainWindow()
@@ -153,22 +152,32 @@ def test_cancel_paused_batch(tmp_path):
         started.set()
         assert release.wait(5)
 
-    cell = SimpleNamespace(name="test", params={"detector": "miniML"}, run_preprocess=preprocess, run_detection=lambda: completed.append(True) or 1)
+    from patchclamp_gui.core.session import CellSession
+    from patchclamp_gui.io import simulate_recording
+    class SlowCell(CellSession):
+        def run_preprocess(self):
+            preprocess()
+
+        def run_detection(self, progress=None):
+            progress(1, 3)
+            completed.append(True)
+            return 1
+    cell = SlowCell(simulate_recording(1))
     window.detect_batch([cell, cell])
     assert started.wait(5)
     window.pause_button.click()
     release.set()
     deadline = time.monotonic() + 5
-    while window.task_stage != "已暂停，等待继续" and time.monotonic() < deadline:
+    while not window.task_stage.startswith("已暂停") and time.monotonic() < deadline:
         app.processEvents()
         time.sleep(.01)
-    assert window.task_stage == "已暂停，等待继续"
+    assert "已暂停" in window.task_stage and "1/3" in window.task_stage
     window.cancel_button.click()
     deadline = time.monotonic() + 5
     while window.workers and time.monotonic() < deadline:
         app.processEvents()
         time.sleep(.01)
-    assert not window.workers and completed == [True]
+    assert not window.workers and not completed
     assert "已取消" in window.statusBar().currentMessage()
     window.close()
 
@@ -183,6 +192,7 @@ def test_project_resource_lifetime(tmp_path):
     window = MainWindow()
     source = tmp_path / "sample.npy"
     np.save(source, np.zeros(20000))
+    cell_ref = buffer_ref = None
     for index in range(3):
         assert window.activate_project(tmp_path / str(index), create=True)
         if index:
@@ -206,7 +216,7 @@ def test_project_resource_lifetime(tmp_path):
 def test_cell_filter_sort(tmp_path):
     import numpy as np
     from patchclamp_gui.gui.main_window import MainWindow
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = MainWindow()
     assert window.activate_project(tmp_path / "filtered", create=True)
     paths = []
@@ -281,7 +291,7 @@ def test_import_preset_override_persists(tmp_path):
     import numpy as np
     from patchclamp_gui.core.detection import preset_from_path
     from patchclamp_gui.gui.main_window import MainWindow
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     window = MainWindow()
     root = tmp_path / "project"
     assert window.activate_project(root, create=True)
@@ -300,3 +310,33 @@ def test_import_preset_override_persists(tmp_path):
     assert other.activate_project(root)
     assert other.project.cells[0].params["direction"] == "negative"
     other.close()
+
+def test_threshold_preview_can_be_declined(tmp_path, monkeypatch):
+    import time
+    from patchclamp_gui.gui.main_window import MainWindow
+    from patchclamp_gui.core.session import CellSession
+    from patchclamp_gui.io import simulate_recording
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow()
+    assert window.activate_project(tmp_path / "preview", create=True)
+    cell = CellSession(simulate_recording(4, seed=1))
+    cell.run_detection()
+    window.project.cells.append(cell)
+    window.refresh_cells()
+    window.cell_table.selectRow(0)
+    window.p["threshold"].setValue(.75)
+    prompts = []
+    def decline(parent, title, message):
+        prompts.append(message)
+        return QtWidgets.QMessageBox.No
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question", decline)
+    original = cell.events
+    window.run_detect_current()
+    deadline = time.monotonic() + 60
+    while window.workers and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.01)
+    assert not window.workers and window.last_error is None
+    assert len(prompts) == 1 and "新增" in prompts[0]
+    assert cell.events is original and cell.params["threshold"] == .5
+    window.close()

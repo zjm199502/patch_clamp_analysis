@@ -5,7 +5,9 @@ import os
 import csv
 import gc
 import threading
+import time
 import traceback
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -39,6 +41,10 @@ def wait_for_io(pool, fn, *args):
         loop.exec()
     timer.stop()
     return future.result()
+
+
+class DetectionCancelled(Exception):
+    pass
 
 
 class Worker(QtCore.QThread):
@@ -311,7 +317,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.batch_condition = threading.Condition()
         self.batch_paused = self.batch_cancelled = False
         self.pause_button = QtWidgets.QPushButton("暂停")
-        self.cancel_button = QtWidgets.QPushButton("取消批处理")
+        self.cancel_button = QtWidgets.QPushButton("取消任务")
         self.pause_button.clicked.connect(self.toggle_batch_pause)
         self.cancel_button.clicked.connect(self.cancel_batch)
         for button in (self.pause_button, self.cancel_button):
@@ -1020,7 +1026,7 @@ class MainWindow(QtWidgets.QMainWindow):
     # ================================================================ 后台任务
     def update_task_status(self):
         seconds = self.task_clock.elapsed() // 1000
-        state = "取消中（保留已完成记录）" if self.batch_cancelled else "暂停请求（记录之间等待）" if self.batch_paused else ""
+        state = "取消中（保留已完成记录）" if self.batch_cancelled else "暂停请求" if self.batch_paused else ""
         self.statusBar().showMessage(f"{state} {self.task_stage} · 已用 {seconds // 60:02d}:{seconds % 60:02d}")
 
     def toggle_batch_pause(self):
@@ -1110,13 +1116,61 @@ class MainWindow(QtWidgets.QMainWindow):
         c = self.current
         if c is None:
             return
-        c.params.update(self.read_params())
+        candidate = replace(c, params={**c.params, **self.read_params()}, qc=c.qc.copy())
 
-        def job():
-            c.run_preprocess()
-            return c.run_detection()
+        def job(report):
+            try:
+                candidate.run_preprocess()
+                candidate.run_detection(self.window_progress(report, 0, c.name))
+            except DetectionCancelled:
+                return False
+            return not self.batch_cancelled
 
-        self.run_bg(job, lambda n: self._detected(f"{c.name}：检出 {n} 个事件"), f"正在检测 {c.name} …")
+        def finish(completed):
+            if not completed:
+                self.statusBar().showMessage(f"已取消 {c.name} 的检测。")
+                return
+            if (candidate.det.method == "miniML" and c.events is not None and c.det is not None
+                    and candidate.det.threshold != c.det.threshold):
+                before, after = set(c.events.peak_idx), set(candidate.events.peak_idx)
+                message = f"{c.name}：原有 {len(before)} 个峰，新结果 {len(after)} 个峰。新增 {len(after-before)}，移除 {len(before-after)}。应用结果？"
+                if QtWidgets.QMessageBox.question(self, "阈值调整预览", message) != QtWidgets.QMessageBox.Yes:
+                    self.statusBar().showMessage("已保留原检测结果。")
+                    return
+            self.apply_detection(c, candidate)
+            self._detected(f"{c.name}：检出 {len(c.events)} 个事件")
+
+        self.run_bg(job, finish, f"正在检测 {c.name} …", total=1)
+
+    @staticmethod
+    def apply_detection(cell, candidate):
+        """Commit a completed run together, after cancellation and preview checks."""
+        for name in ("params", "processed", "qc", "det", "events", "waves", "t_wave", "detected_signature", "failure"):
+            setattr(cell, name, getattr(candidate, name))
+
+    def window_progress(self, report, completed, label):
+        started = None
+        last_report = 0.0
+
+        def update(done, total):
+            nonlocal started, last_report
+            now = time.monotonic()
+            if started is None:
+                started = now
+            with self.batch_condition:
+                if self.batch_paused:
+                    report(completed, f"已暂停 · {label} · {done}/{total} 个窗口")
+                    self.batch_condition.wait_for(lambda: not self.batch_paused or self.batch_cancelled)
+                    started += time.monotonic() - now
+                if self.batch_cancelled:
+                    raise DetectionCancelled()
+            now = time.monotonic()
+            if done in (0, total) or now - last_report >= .2:
+                remaining = (now - started) * (total - done) / done if done else 0
+                eta = f" · 预计剩余 {remaining:.0f} 秒" if done and done < total else ""
+                report(completed, f"{label} · {done}/{total} 个窗口（{100*done/max(1,total):.0f}%）{eta}")
+                last_report = now
+        return update
 
     def run_detect_all(self):
         self.detect_batch(list(self.project.cells))
@@ -1139,12 +1193,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("未选中记录，或所选记录已使用这些参数。")
             return
         if any(cell.processed is not None for cell in cells):
-            if QtWidgets.QMessageBox.question(self, "应用参数", f"参数变更将清除 {len(cells)} 条记录的旧预处理和检测结果。继续吗？",
+            if QtWidgets.QMessageBox.question(self, "应用参数", f"向 {len(cells)} 条记录应用参数？仅调整 miniML 阈值或最小幅度时，旧结果保留至重新检测。其他变更会清除旧结果。",
                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No) != QtWidgets.QMessageBox.Yes:
                 return
         for cell in cells:
             old_family = cell.family()
-            cell.clear_detection(preprocessing=True); cell.params.update(params)
+            changed = {key for key, value in params.items() if cell.params.get(key, DEFAULT_PARAMS.get(key)) != value}
+            if cell.params["detector"] != "miniML" or changed - {"threshold", "min_amplitude"}:
+                cell.clear_detection(preprocessing=True)
+            cell.params.update(params)
             cell.event_family = cell.family() if not old_family else old_family
         self.dirty = True; self.clear_deconv_view(); self.cluster_panel.clear_result(); self.cluster_msg.clear()
         self.refresh_cells(); self.refresh_trace(); self.refresh_events()
@@ -1199,12 +1256,21 @@ class MainWindow(QtWidgets.QMainWindow):
                             label = f"第 {index + 1} 条 · {cell.name[:36]}"
                             report(completed, f"预处理：{label}")
                         try:
-                            cell.run_preprocess()
+                            is_miniml = cell.params["detector"] == "miniML"
+                            candidate = replace(cell, qc=cell.qc.copy()) if is_miniml else cell
+                            candidate.run_preprocess()
                             with self.batch_condition:
                                 report(completed, f"检测：{label}")
-                            count = cell.run_detection()
+                            if is_miniml:
+                                count = candidate.run_detection(self.window_progress(report, completed, label))
+                                self.apply_detection(cell, candidate)
+                            else:
+                                count = cell.run_detection()
+                        except DetectionCancelled:
+                            return
                         except Exception as error:
-                            cell.clear_detection()
+                            if not is_miniml:
+                                cell.clear_detection()
                             cell.failure = str(error) or type(error).__name__
                             count = 0
                             with self.batch_condition:
