@@ -4,6 +4,8 @@ from __future__ import annotations
 import numpy as np
 from scipy import signal
 
+from . import gpu
+
 
 def lowpass(y: np.ndarray, fs: float, cutoff_hz: float, order: int = 4) -> np.ndarray:
     if not cutoff_hz or cutoff_hz >= fs / 2:
@@ -37,8 +39,12 @@ def rolling_baseline(y: np.ndarray, fs: float, win_s: float = 1.0) -> np.ndarray
     w = max(int(win_s * fs), 10)
     nseg = max(len(y) // w, 1)
     edges = np.linspace(0, len(y), nseg + 1).astype(int)
+    med = None
+    if gpu.enabled() and len(y) >= 500_000:
+        med = gpu.calculate("baseline", {"x": y}, segments=nseg)
+    if med is None:
+        med = np.array([np.median(y[a:b]) for a, b in zip(edges[:-1], edges[1:])])
     xc = (edges[:-1] + edges[1:]) / 2
-    med = np.array([np.median(y[a:b]) for a, b in zip(edges[:-1], edges[1:])])
     return np.interp(np.arange(len(y)), xc, med)
 
 

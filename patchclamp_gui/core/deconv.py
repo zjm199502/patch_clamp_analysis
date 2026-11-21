@@ -14,9 +14,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy import signal
 from scipy.fft import irfft, next_fast_len, rfft, rfftfreq
 
+from . import gpu
 from ..io import biexp_kernel
 from .preprocess import highpass, noise_rms
 
@@ -44,18 +44,23 @@ def deconvolve(y: np.ndarray, fs: float, tau_rise_ms: float = 0.5, tau_decay_ms:
     nfft = next_fast_len(n + int(0.05 * fs), real=True)
     if kernel is None:
         kernel = biexp_kernel(fs, tau_rise_ms, tau_decay_ms)
-    K = rfft(kernel, nfft)
-    S = rfft(s, nfft)
-    f = rfftfreq(nfft, 1 / fs)
-    wiener = np.conj(K) / (np.abs(K) ** 2 + reg * np.max(np.abs(K)) ** 2)
     sigma = smooth_ms / 1e3
-    G = np.exp(-0.5 * (2 * np.pi * f * sigma) ** 2) if sigma > 0 else 1.0
-    d = irfft(S * wiener * G, nfft)[:n]
+    use_gpu = gpu.enabled() and n >= 250_000
+    d = K = None
+    if use_gpu:
+        d = gpu.calculate("wiener", {"x": s, "kernel": kernel}, nfft=nfft, reg=reg, fs=fs, sigma=sigma)
+    if d is None:
+        K = rfft(kernel, nfft)
+        S = rfft(s, nfft)
+        f = rfftfreq(nfft, 1 / fs)
+        wiener = np.conj(K) / (np.abs(K) ** 2 + reg * np.max(np.abs(K)) ** 2)
+        G = np.exp(-0.5 * (2 * np.pi * f * sigma) ** 2) if sigma > 0 else 1.0
+        d = irfft(S * wiener * G, nfft)[:n]
 
     sd = noise_rms(d)
     thr = threshold_sd * sd
     dist = max(int(min_interval_ms / 1e3 * fs), 1)
-    peaks, props = signal.find_peaks(d, height=thr, distance=dist)
+    peaks = gpu.find_peaks(d, height=thr, distance=dist)
 
     # 稀疏化：只保留超过阈值的峰附近区域，再与模板卷积重建
     sparse = np.zeros(n)
@@ -65,9 +70,15 @@ def deconvolve(y: np.ndarray, fs: float, tau_rise_ms: float = 0.5, tau_decay_ms:
         for p in peaks:
             mask[max(p - half, 0):p + half + 1] = True
         sparse[mask] = np.clip(d[mask], 0, None)
-    recon = irfft(rfft(sparse, nfft) * K, nfft)[:n]
+    recon = None
+    if use_gpu:
+        recon = gpu.calculate("reconstruct", {"x": sparse, "kernel": kernel}, nfft=nfft)
+    if recon is None:
+        if K is None:
+            K = rfft(kernel, nfft)
+        recon = irfft(rfft(sparse, nfft) * K, nfft)[:n]
     return DeconvResult(deconvolved=d, threshold=thr, peaks=peaks,
-                        peak_heights=props.get("peak_heights", np.array([])),
+                        peak_heights=d[peaks],
                         sparse=sparse, reconvolved=sign * recon, kernel=kernel, sd=sd)
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import csv
 import gc
+import subprocess
 import threading
 import time
 import traceback
@@ -17,7 +18,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from .. import __version__, io
-from ..core import clustering, deconv, detection, plots, project_files
+from ..core import gpu, clustering, deconv, detection, plots, project_files
 from ..core.features import FEATURES
 from ..core import import_metadata, provenance
 from ..core import features
@@ -170,6 +171,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.deconv_res = None
         self.last_error = None
         self.settings = QtCore.QSettings("PatchClampAnalysis", "PatchClampAnalysis")
+        gpu.configure(self.settings.value("analysis/gpuPython", "", type=str))
         self._build_menu()
         self._build_ui()
         self.set_ui_points(int(self.settings.value("ui/points", 10)))
@@ -206,6 +208,7 @@ class MainWindow(QtWidgets.QMainWindow):
             action.setEnabled(False)
         view = self.menuBar().addMenu("视图")
         performance = self.menuBar().addMenu("性能")
+        performance.addAction("GPU 加速设置…", self.choose_gpu)
         performance.addAction("分析 CPU 核心数…", self.choose_cpu_count)
         view.addAction("放大界面文字", lambda: self.set_ui_points(self.font().pointSize() + 1), "Ctrl+=")
         view.addAction("缩小界面文字", lambda: self.set_ui_points(self.font().pointSize() - 1), "Ctrl+-")
@@ -1086,6 +1089,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def finish(res):
             unlock(); on_done(res)
+            if gpu.failure:
+                self.statusBar().showMessage(f"{self.statusBar().currentMessage()} · 已转用 CPU：{gpu.failure}")
 
         def fail(tb):
             unlock()
@@ -1209,6 +1214,31 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def run_detect_selected(self):
         self.detect_batch(self.selected_cells())
+
+    def choose_gpu(self):
+        if self.workers:
+            self.statusBar().showMessage("请在当前任务完成后切换计算设备。")
+            return
+        current = self.settings.value("analysis/gpuPython", "", type=str)
+        options = ["使用 CPU", *dict.fromkeys(filter(None, [current, *gpu.candidates()])), "浏览 Python 可执行文件…"]
+        selected, ok = QtWidgets.QInputDialog.getItem(
+            self, "GPU 加速", "选择安装了 CUDA 版 PyTorch、NumPy 和 h5py 的 Python 环境",
+            options, options.index(current) if current else 0, False)
+        if not ok:
+            return
+        if selected == options[-1]:
+            selected, _ = QtWidgets.QFileDialog.getOpenFileName(self, "选择 GPU 环境中的 Python")
+            if not selected:
+                return
+        path = "" if selected == options[0] else selected
+        try:
+            device = gpu.probe(path) if path else "CPU"
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            QtWidgets.QMessageBox.warning(self, "GPU 环境不可用", str(exc))
+            return
+        gpu.configure(path)
+        self.settings.setValue("analysis/gpuPython", path)
+        self.statusBar().showMessage(f"分析设备：{device}")
 
     def choose_cpu_count(self):
         capacity = available()
@@ -1369,6 +1399,8 @@ class MainWindow(QtWidgets.QMainWindow):
             s += f"｜噪声 RMS {c.qc['noise_rms']:.2f}"
         if c.events is not None:
             n = int(c.mask().sum()); s += f"\n事件 {n} 个，{n / c.rec.duration:.2f} Hz（{c.det.method}）"
+        if c.det and c.det.method == "miniML":
+            s += f"｜推理后端 {c.det.params.get('backend', 'TensorFlow')}"
         self.info.setText(s)
         if reset:
             self.p_trace.enableAutoRange(); self.p_det.enableAutoRange()
@@ -1627,6 +1659,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("已导出：" + "，".join(os.path.basename(f) for f in files))
 
     def release_project_resources(self):
+        gpu.close()
         detection.clear_model_cache()
         self.task_timer.stop()
         self.current = self.last_error = None

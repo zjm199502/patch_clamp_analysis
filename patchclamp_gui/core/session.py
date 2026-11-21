@@ -91,7 +91,14 @@ class CellSession:
         if result.method == "miniML" and self.det is not None and self.det.method == "miniML":
             old_key = self.det.params.get("prediction_key")
             if old_key:
-                same_input = result.params.get("prediction_key") == old_key
+                # CPU and CUDA can have distinct predictions for the same input.
+                # Preserve user review on matching peaks when changing only the backend.
+                new_key = result.params.get("prediction_key", [])
+                if new_key and new_key[-1] == "cuda-torch-1":
+                    new_key = new_key[:-1]
+                if old_key[-1] == "cuda-torch-1":
+                    old_key = old_key[:-1]
+                same_input = new_key == old_key
             else:
                 # Legacy projects have the result signature but no raw window scores.
                 before = replace(self, params={**p, "threshold": self.det.threshold})

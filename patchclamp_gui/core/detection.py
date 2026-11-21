@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import gpu
 from .deconv import deconvolve
 
 # 不同类型事件的经验默认参数（可在界面中修改）
@@ -69,7 +70,7 @@ def _graph_minmax(window):
 _model_cache = {}
 
 
-def _packed_predict(detector, progress=None):
+def _packed_predict(detector, progress=None, gpu_model=None):
     import tensorflow as tf
     from scipy.signal import resample
     data = resample(detector.trace.data, round(len(detector.trace.data) * detector.resampling_factor))
@@ -78,6 +79,20 @@ def _packed_predict(detector, progress=None):
     width = round(detector.window_size * detector.resampling_factor)
     step = round(detector.stride_length * detector.resampling_factor)
     windows = np.lib.stride_tricks.sliding_window_view(data.astype(np.float32), width)[::step]
+    if gpu_model:
+        key, graph_hash = gpu_model
+        predictions = []
+        for start in range(0, len(windows), detector.batch_size):
+            batch = np.ascontiguousarray(windows[start:start+detector.batch_size])
+            result = gpu.calculate("predict", {"x": batch}, key=key, graph_hash=graph_hash)
+            if result is None:
+                return False
+            predictions.append(result)
+            if progress:
+                progress(start + len(batch), len(windows))
+        detector.prediction = np.concatenate(predictions)
+        return True
+    # Retry the entire trace on one backend if CUDA failed between batches.
     infer = getattr(detector.model, "_clamp_infer", None)
     if infer is None or getattr(detector.model, "_clamp_width", None) != width:
         model = detector.model
@@ -142,6 +157,9 @@ def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_
         engine_version = "bundled"
     cache_key = [1, digest, fs, unit, direction, win, *key, packed, batch_size,
                  engine_version, tf.__version__]
+    graph = gpu.model_graph(key) if gpu.enabled() and not callbacks else None
+    if graph:
+        cache_key.append("cuda-torch-1")
     reuse = (previous is not None and previous.window_scores is not None
              and previous.params.get("prediction_key") == cache_key and not callbacks)
     window_scores = None
@@ -154,19 +172,29 @@ def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_
             total = 1 + (round(len(y) * det.resampling_factor) - width) // step
             if progress:
                 progress(0, total)
-            if reuse and previous.window_scores.shape == (total,):
-                det.prediction = tf.convert_to_tensor(previous.window_scores)
-                if progress:
-                    progress(total, total)
-            elif packed and not callbacks:
-                _packed_predict(det, progress)
-            else:
+            def standard_predict():
                 if progress:
                     class Progress(tf.keras.callbacks.Callback):
                         def on_predict_batch_end(self, batch, logs=None):
                             progress(min((batch + 1) * batch_size, total), total)
                     det.callbacks = [*det.callbacks, Progress()]
                 original_predict()
+
+            if reuse and previous.window_scores.shape == (total,):
+                det.prediction = tf.convert_to_tensor(previous.window_scores)
+                if progress:
+                    progress(total, total)
+            elif graph:
+                if not _packed_predict(det, progress, (key, graph)):
+                    cache_key.pop()
+                    if packed:
+                        _packed_predict(det, progress)
+                    else:
+                        standard_predict()
+            elif packed and not callbacks:
+                _packed_predict(det, progress)
+            else:
+                standard_predict()
             window_scores = np.asarray(det.prediction).reshape(-1)
         det._EventDetection__predict = predict
     try:
@@ -182,6 +210,7 @@ def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_
                      method="miniML", trace=np.asarray(det.prediction, float), threshold=threshold,
                      window_scores=window_scores,
                      params=dict(model=model, window_ms=window_ms, threshold=threshold, direction=direction,
+                                 backend="CUDA" if cache_key[-1] == "cuda-torch-1" else "TensorFlow",
                                  batch_size=batch_size, prediction_key=cache_key))
 
 

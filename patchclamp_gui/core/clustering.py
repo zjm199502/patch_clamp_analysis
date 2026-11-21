@@ -20,6 +20,7 @@ from sklearn.metrics import silhouette_score
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import RobustScaler
 
+from . import gpu
 from .features import FEATURES
 
 LOG_FEATURES = {"amplitude", "rise_10_90", "decay_tau", "half_width", "charge", "max_rise_slope"}
@@ -49,6 +50,13 @@ def _matrix(df: pd.DataFrame, waves: np.ndarray, representation: str, features: 
     if representation == "waveform":
         pk = np.nanmax(waves, axis=1, keepdims=True)
         valid = np.isfinite(waves).all(axis=1) & (pk[:, 0] > 0)
+        if gpu.enabled() and waves.size >= 100_000 and valid.sum() >= 30:
+            components = min(n_components, int(valid.sum()) - 1, waves.shape[1])
+            scores = gpu.calculate("waveform", {"x": waves[valid].astype(float, copy=False)},
+                                   width=max(waves.shape[1] // 100, 1), components=components)
+            if scores is not None:
+                z = scores[:-1]
+                return np.clip(z / z[:, 0].std(), -5, 5), valid, scores[-1]
         X = waves[valid] / pk[valid]
         # 轻度平滑抑制单个事件上的高频噪声，否则噪声会被 PCA 当成"形状差异"
         kw = max(X.shape[1] // 100, 1)

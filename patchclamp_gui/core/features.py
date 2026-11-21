@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import curve_fit
 
+from . import gpu
+
 FEATURES = ["amplitude", "rise_10_90", "decay_tau", "half_width", "charge", "max_rise_slope"]
 FEATURE_LABELS = {
     "amplitude": "Amplitude (pA)",
@@ -58,7 +60,12 @@ def extract_events(y: np.ndarray, fs: float, onsets: np.ndarray, direction: str 
     k = max(int(round(smooth_ms / 1e3 * fs)), 1)
     if k > 1:
         w = np.hanning(k + 2)[1:-1]
-        ys = np.convolve(s, w / w.sum(), mode="same")
+        weights = w / w.sum()
+        ys = None
+        if gpu.enabled() and n >= 500_000 and k >= 9:
+            ys = gpu.calculate("smooth", {"x": s, "kernel": weights})
+        if ys is None:
+            ys = np.convolve(s, weights, mode="same")
     else:
         ys = s
     win = int(round(window_ms / 1e3 * fs))

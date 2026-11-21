@@ -12,7 +12,7 @@ python -c "import patchclamp_gui; open('base_version.txt','w').write(patchclamp_
 pyinstaller --noconfirm --clean --windowed --name PatchClampAnalysis ^
   --icon packaging/clamptrace.ico --collect-data patchclamp_gui ^
   --hidden-import matplotlib.backends.backend_pdf --hidden-import matplotlib.backends.backend_svg ^
-  --add-data "base_version.txt:." --collect-submodules patchclamp_gui ^
+  --add-data "patchclamp_gui/core/gpu_worker.py:patchclamp_gui/core" --add-data "base_version.txt:." --collect-submodules patchclamp_gui ^
   --collect-submodules pyqtgraph --collect-data pyqtgraph ^
   --collect-submodules miniml --collect-data miniml ^
   --exclude-module numba --exclude-module llvmlite --exclude-module umap ^

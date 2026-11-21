@@ -1,7 +1,7 @@
 """Analyze single-channel current-clamp recordings with a variable square step."""
 import numpy as np
 import pyabf
-from scipy.signal import find_peaks
+from . import gpu
 
 
 def step_metrics(voltage, rate, start, stop, threshold):
@@ -9,7 +9,7 @@ def step_metrics(voltage, rate, start, stop, threshold):
     segment = voltage[start:stop]
     if not baseline.size or len(segment) < 3 or not np.isfinite(np.r_[baseline, segment]).all():
         raise ValueError("阶跃或基线窗口无效")
-    peaks, _ = find_peaks(segment, height=threshold, prominence=15, distance=max(1, round(.002 * rate)))
+    peaks = gpu.find_peaks(segment, height=threshold, prominence=15, distance=max(1, round(.002 * rate)))
     return dict(baseline_mV=float(np.median(baseline)), count=len(peaks),
                 rate_Hz=len(peaks) * rate / len(segment), peak_ms=(peaks * 1000 / rate).tolist(),
                 steady_mV=float(np.median(segment[-max(1, len(segment) // 10):])))
