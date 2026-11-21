@@ -19,6 +19,7 @@ pyinstaller --noconfirm --clean --windowed --name PatchClampAnalysis ^
   --exclude-module PyQt5 --exclude-module PyQt6 --exclude-module qt_material ^
   --exclude-module tkinter ^
   packaging\launcher.py || goto :error
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_directml.ps1 || goto :error
 echo.
 set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
 if not exist "%ISCC%" set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"

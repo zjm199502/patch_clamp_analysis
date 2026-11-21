@@ -94,6 +94,10 @@ def test_channel_patch_and_full(monkeypatch, tmp_path):
     (tmp_path / "unins000.exe").touch()
     monkeypatch.setattr(updater.sys, "platform", "win32")
     assert updater.check_latest().kind == "page"
+    slot = tmp_path / "ClampTrace-runtime-2"
+    slot.mkdir()
+    monkeypatch.setattr(updater, "install_root", lambda: slot)
+    assert updater.check_latest().kind == "page"
     # running from source -> only the download page
     monkeypatch.setattr(patching, "base_version", lambda: None)
     assert updater.check_latest().kind in ("full", "page")

@@ -85,6 +85,11 @@ jobs:
           --exclude-module numba --exclude-module llvmlite --exclude-module umap
           --exclude-module PyQt5 --exclude-module PyQt6 --exclude-module qt_material
           --exclude-module tkinter packaging/launcher.py
+      - name: Bundle offline Windows GPU runtime
+        shell: pwsh
+        run: ./packaging/build_directml.ps1
+      - name: Check packaged DirectML detection and CPU fallback
+        run: python packaging/check_directml.py dist/PatchClampAnalysis
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path dist\PatchClampAnalysis -DestinationPath PatchClampAnalysis-Windows.zip
@@ -93,11 +98,7 @@ jobs:
         run: |
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\clamptrace.iss
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          $dir = Join-Path $env:RUNNER_TEMP 'ClampTrace-install-test'
-          $setup = Start-Process .\ClampTrace-Windows-Setup.exe -ArgumentList '/VERYSILENT', '/NORESTART', "/DIR=`"$dir`"" -Wait -PassThru -WindowStyle Hidden
-          if ($setup.ExitCode -ne 0 -or !(Test-Path "$dir\PatchClampAnalysis.exe")) { throw 'Installation failed' }
-          $uninstall = Start-Process "$dir\unins000.exe" -ArgumentList '/VERYSILENT', '/NORESTART' -Wait -PassThru -WindowStyle Hidden
-          if ($uninstall.ExitCode -ne 0 -or (Test-Path "$dir\PatchClampAnalysis.exe")) { throw 'Uninstall failed' }
+          ./packaging/check_windows_install.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: windows
@@ -222,5 +223,6 @@ jobs:
         run: |
           gh release upload "$TARGET" assets/* --clobber
           gh release view "$TARGET" --json body -q .body > body.md
-          printf '\n\n> 安装包已替换为 v%s 的构建（加入软件内小版本更新）。\n' "$VERSION" >> body.md
+          printf '\n\n### 安装包更新 v%s\n' "$VERSION" >> body.md
+          cat notes.md >> body.md
           gh release edit "$TARGET" --notes-file body.md

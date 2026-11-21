@@ -94,9 +94,9 @@ class CellSession:
                 # Compute backends can have distinct predictions for the same input.
                 # Preserve user review on matching peaks when changing only the backend.
                 new_key = result.params.get("prediction_key", [])
-                if new_key and new_key[-1] in ("cuda-torch-1", "mps-torch-1"):
+                if new_key and new_key[-1] in ("cuda-torch-1", "mps-torch-1", "directml-onnx-1"):
                     new_key = new_key[:-1]
-                if old_key[-1] in ("cuda-torch-1", "mps-torch-1"):
+                if old_key[-1] in ("cuda-torch-1", "mps-torch-1", "directml-onnx-1"):
                     old_key = old_key[:-1]
                 same_input = new_key == old_key
             else:

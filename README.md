@@ -14,9 +14,9 @@ Windows 用户请从正式 Release 下载 **ClampTrace-Windows-Setup.exe**，运
 
 **GPU 加速**。Apple 芯片 Mac 用户下载正式 Release 的 arm64 DMG，将 ClampTrace 拖入「应用程序」。应用内置 Metal（MPS）运行时，首次分析自动尝试使用 Apple GPU。每次载入新模型时会在本机对照 CPU 核验一批预测值。若 Metal 不可用，分析会转用 CPU。可在「性能 → GPU 加速设置」切换设备。
 
-Windows 用户在同一菜单选择装有 CUDA 版 PyTorch、NumPy 和 h5py 的 Python。使用原生 NVIDIA CUDA 即可运行。[PyTorch 安装说明](https://pytorch.org/get-started/locally/)
+Windows 安装包和便携包内置 DirectML，在支持 DirectX 12 的显卡上默认尝试 GPU 检测。无需另装 Python、CUDA 或 PyTorch。可从「性能 → GPU 加速设置」选择 CPU，或在高级选项选用已有 CUDA 环境。GPU 无法启动时软件会切换至 CPU。[DirectML 设备要求](https://onnxruntime.ai/docs/execution-providers/DirectML-ExecutionProvider.html#requirements)
 
-两个 GPU 后端均支持随 miniML 提供的 GC 模型和相同结构的迁移学习模型，可用于单条及批量检测。记录信息显示实际推理后端。CUDA 还支持长记录的基线估计、去卷积 FFT、事件平滑、候选峰搜索与波形 PCA。Mac 的双精度信号运算、逐事件拟合和文件读写由 CPU 处理。[Apple 对 MPS 的说明](https://developer.apple.com/metal/pytorch/)
+各 GPU 后端均支持随 miniML 提供的 GC 模型和相同结构的迁移学习模型，可用于单条及批量检测。记录信息显示实际推理后端。CUDA 还支持长记录的基线估计、去卷积 FFT、事件平滑、候选峰搜索与波形 PCA。Mac 的双精度信号运算、逐事件拟合和文件读写由 CPU 处理。[Apple 对 MPS 的说明](https://developer.apple.com/metal/pytorch/)
 
 **调整 miniML 阈值**：在「记录与检测」修改阈值并检测当前细胞，查看新增和移除的峰数后选择是否应用。同一输入和推理设置可复用项目中的滑窗预测。首次打开旧项目时重新推理一次即可建立缓存。同一峰的排除标记和手工补录事件随阈值重算保留。
 

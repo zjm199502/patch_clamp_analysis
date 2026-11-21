@@ -45,6 +45,7 @@ def enabled():
     return bool(_python) and not failure
 
 
+BUNDLED_DML = "@clamptrace/directml"
 BUNDLED_METAL = "@clamptrace/metal"
 
 
@@ -53,37 +54,32 @@ def bundled_worker():
         path = Path(sys.executable).parent.parent / "Resources/ClampTraceMetal/ClampTraceMetal"
         if path.is_file():
             return path
+    if sys.platform == "win32" and getattr(sys, "frozen", False):
+        path = Path(sys.executable).parent / "_internal/ClampTraceDirectML/ClampTraceDirectML.exe"
+        if path.is_file():
+            return path
     return None
 
 
 def default_runtime():
-    return BUNDLED_METAL if bundled_worker() else ""
+    if bundled_worker():
+        return BUNDLED_DML if sys.platform == "win32" else BUNDLED_METAL
+    return ""
 
 
 def backend():
+    if _python == BUNDLED_DML:
+        return "DirectML"
     return "MPS" if sys.platform == "darwin" and platform.machine() == "arm64" else "CUDA"
 
 
 def prediction_tag():
-    return backend().lower() + "-torch-1"
+    return "directml-onnx-1" if backend() == "DirectML" else backend().lower() + "-torch-1"
 
 
 def supports(op):
     # Metal implements the network in float32. Preserve the original float64 signal mathematics.
-    return enabled() and (backend() != "MPS" or op == "predict")
-
-
-def candidates():
-    paths = []
-    if not getattr(sys, "frozen", False):
-        paths.append(Path(sys.executable))
-    registry = Path.home() / ".conda" / "environments.txt"
-    if registry.is_file():
-        for line in registry.read_text(encoding="utf-8-sig", errors="replace").splitlines():
-            if line.strip():
-                root = Path(line.strip())
-                paths.append(root / ("python.exe" if os.name == "nt" else "bin/python"))
-    return list(dict.fromkeys(str(p) for p in paths if p.is_file()))
+    return enabled() and (backend() == "CUDA" or op == "predict")
 
 
 def _options():
@@ -101,10 +97,10 @@ def _options():
 
 
 def _command(python, arg):
-    if python == BUNDLED_METAL:
+    if python in (BUNDLED_DML, BUNDLED_METAL):
         path = bundled_worker()
         if path is None:
-            raise FileNotFoundError("未找到内置 Metal 运行时")
+            raise FileNotFoundError("未找到内置 GPU 运行时")
         return [str(path), arg]
     return [python, "-I", "-u", str(Path(__file__).with_name("gpu_worker.py")), arg]
 

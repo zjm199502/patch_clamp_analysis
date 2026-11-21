@@ -1220,21 +1220,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("请在当前任务完成后切换计算设备。")
             return
         current = self.settings.value("analysis/gpuPython", gpu.default_runtime(), type=str)
-        paths = list(dict.fromkeys(filter(None, [gpu.default_runtime(), current, *gpu.candidates()])))
-        options = ["使用 CPU", *["内置 Apple GPU（Metal）" if p == gpu.BUNDLED_METAL else p for p in paths],
-                   "浏览 Python 可执行文件…"]
+        auto = gpu.default_runtime()
+        choices = {}
+        if auto:
+            choices["自动使用内置 GPU（推荐）"] = auto
+        choices["使用 CPU"] = ""
+        if current and current not in (gpu.BUNDLED_METAL, gpu.BUNDLED_DML):
+            choices[f"已选择的外部环境 · {current}"] = current
+        browse = "高级 · 选择外部 PyTorch 环境…"
+        options = [*choices, browse]
         selected, ok = QtWidgets.QInputDialog.getItem(
-            self, "GPU 加速", "选择设备，或选择装有 GPU 版 PyTorch、NumPy 和 h5py 的 Python 环境",
-            options, paths.index(current) + 1 if current else 0, False)
+            self, "GPU 加速", "miniML 检测设备（GPU 不可用时自动使用 CPU）", options,
+            next((i for i, value in enumerate(choices.values()) if value == current), 0), False)
         if not ok:
             return
-        if selected in options[1:-1]:
-            selected = paths[options.index(selected) - 1]
-        if selected == options[-1]:
-            selected, _ = QtWidgets.QFileDialog.getOpenFileName(self, "选择 GPU 环境中的 Python")
-            if not selected:
+        if selected == browse:
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "选择 GPU 环境中的 Python")
+            if not path:
                 return
-        path = "" if selected == options[0] else selected
+        else:
+            path = choices[selected]
         try:
             device = gpu.probe(path) if path else "CPU"
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
