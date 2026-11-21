@@ -123,3 +123,24 @@ def test_metal_routing_and_runtime_selection(monkeypatch, tmp_path):
         assert not gpu.supports("baseline")
         assert gpu.calculate("wiener", {"x": np.ones(10)}) is None
         assert not gpu.failure
+
+
+def test_directml_from_active_patch(monkeypatch, tmp_path):
+    import sys
+
+    base = tmp_path / "installed"
+    patch_root = tmp_path / "patches" / "0.3.1"
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(base / "PatchClampAnalysis.exe"))
+    monkeypatch.setattr(gpu, "__file__", str(patch_root / "patchclamp_gui/core/gpu.py"))
+    relative = "ClampTraceDirectML/ClampTraceDirectML.exe"
+    worker = patch_root / "runtimes" / relative
+    worker.parent.mkdir(parents=True)
+    worker.touch()
+    assert gpu.default_runtime() == gpu.BUNDLED_DML
+    assert gpu._command(gpu.BUNDLED_DML, "--probe") == [str(worker), "--probe"]
+    installed = base / "_internal" / relative
+    installed.parent.mkdir(parents=True)
+    installed.touch()
+    assert gpu.bundled_worker() == installed

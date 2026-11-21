@@ -171,6 +171,7 @@ jobs:
       FULL: ${{ needs.test.outputs.full }}
       MAJOR: ${{ needs.test.outputs.major }}
       MIN_BASE: ${{ needs.test.outputs.min_base }}
+      PATCH_FILE: patchclamp_gui-patch-${{ needs.test.outputs.version }}.zip
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -178,7 +179,16 @@ jobs:
         with: {path: assets, merge-multiple: true}
       - name: Small update package and notes
         run: |
-          zip -qr patchclamp_gui-patch.zip patchclamp_gui -x '*__pycache__*'
+          extra=()
+          if [ "$MIN_BASE" = "0.3.0" ] && [ "$VERSION" != "0.3.0" ]; then
+            win=assets/PatchClampAnalysis-Windows.zip
+            if [ "$FULL" != "true" ]; then
+              mkdir -p assets
+              gh release download updates -p PatchClampAnalysis-Windows.zip -O "$win"
+            fi
+            extra=(--windows-zip "$win")
+          fi
+          python3 packaging/build_patch.py "$PATCH_FILE" "${extra[@]}"
           awk -v t="## v$VERSION" '$0==t{f=1;next} /^## /{f=0} f' CHANGELOG.md > notes.md
           test -s notes.md || echo "PatchClampAnalysis v$VERSION" > notes.md
           cat notes.md
@@ -186,8 +196,12 @@ jobs:
         run: |
           gh release view updates >/dev/null 2>&1 || gh release create updates --prerelease \
             --title "自动更新通道" --notes "软件内自动更新使用的文件，请不要手动下载。新用户请从最新的正式版本安装。"
-          gh release download updates -p latest.json -O old.json 2>/dev/null || echo '{}' > old.json
-          upload="patchclamp_gui-patch.zip"
+          if [ "$FULL" = "true" ]; then
+            echo '{}' > old.json
+          else
+            gh release download updates -p latest.json -O old.json
+          fi
+          upload="$PATCH_FILE"
           if [ "$FULL" = "true" ]; then upload="$upload assets/PatchClampAnalysis-Windows.zip assets/PatchClampAnalysis-macOS-arm64.zip"; fi
           gh release upload updates $upload --clobber
           python3 - <<'PY'
@@ -199,7 +213,7 @@ jobs:
           m = {"version": v, "notes": open("notes.md", encoding="utf-8").read(),
                "min_base": os.environ["MIN_BASE"],
                "page": f"https://github.com/{repo}/releases/latest",
-               "patch": {"url": base + "patchclamp_gui-patch.zip", "size": size("patchclamp_gui-patch.zip")}}
+               "patch": {"url": base + os.environ["PATCH_FILE"], "size": size(os.environ["PATCH_FILE"])}}
           if os.environ["FULL"] == "true":
               m["full_version"] = v
               m["full"] = {n: {"url": base + n, "size": size("assets/" + n)}

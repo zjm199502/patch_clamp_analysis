@@ -55,9 +55,12 @@ def bundled_worker():
         if path.is_file():
             return path
     if sys.platform == "win32" and getattr(sys, "frozen", False):
-        path = Path(sys.executable).parent / "_internal/ClampTraceDirectML/ClampTraceDirectML.exe"
-        if path.is_file():
-            return path
+        worker = Path("ClampTraceDirectML/ClampTraceDirectML.exe")
+        # 0.3.0 has no DirectML in the base installation. Its updater extracts the
+        # entire compatibility patch (code + runtimes) into one versioned directory.
+        for root in (Path(sys.executable).parent / "_internal", Path(__file__).resolve().parents[2] / "runtimes"):
+            if (root / worker).is_file():
+                return root / worker
     return None
 
 
