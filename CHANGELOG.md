@@ -2,6 +2,12 @@
 
 每个版本的说明会显示在软件的「发现新版本」对话框和 GitHub Release 页面上。
 
+## v0.3.0
+
+- Apple 芯片 Mac 安装映像内置 Metal（MPS）运行时，自动尝试使用 Apple GPU 进行 miniML 单条和批量检测。模型首次载入会对照 CPU 核验预测；系统或模型不支持时自动回退。
+- 在「性能 → GPU 加速设置」选择内置 Apple GPU、外部 PyTorch 环境或 CPU。记录信息显示实际推理后端。Mac 上的双精度信号分析继续使用 CPU。
+- Windows 安装程序包含原生 CUDA 接口，可连接现有 NVIDIA PyTorch 环境，加速 miniML、长记录去卷积和波形分析。
+
 ## v0.2.14
 
 - 「性能 → GPU 加速设置」可连接本机 CUDA 版 PyTorch 环境，使用 NVIDIA GPU 执行 miniML 首次检测和批处理。Windows 支持原生运行，并保留文件内进度、暂停、取消和阈值快算。

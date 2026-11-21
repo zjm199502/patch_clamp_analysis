@@ -1,7 +1,8 @@
-"""Optional CUDA worker, isolated from the desktop app's Qt and TensorFlow DLLs."""
+"""Optional GPU worker, isolated from the desktop app's Qt and TensorFlow DLLs."""
 import atexit
 import json
 import hashlib
+import platform
 from functools import lru_cache
 import os
 from pathlib import Path
@@ -44,6 +45,34 @@ def enabled():
     return bool(_python) and not failure
 
 
+BUNDLED_METAL = "@clamptrace/metal"
+
+
+def bundled_worker():
+    if sys.platform == "darwin" and getattr(sys, "frozen", False):
+        path = Path(sys.executable).parent.parent / "Resources/ClampTraceMetal/ClampTraceMetal"
+        if path.is_file():
+            return path
+    return None
+
+
+def default_runtime():
+    return BUNDLED_METAL if bundled_worker() else ""
+
+
+def backend():
+    return "MPS" if sys.platform == "darwin" and platform.machine() == "arm64" else "CUDA"
+
+
+def prediction_tag():
+    return backend().lower() + "-torch-1"
+
+
+def supports(op):
+    # Metal implements the network in float32. Preserve the original float64 signal mathematics.
+    return enabled() and (backend() != "MPS" or op == "predict")
+
+
 def candidates():
     paths = []
     if not getattr(sys, "frozen", False):
@@ -63,6 +92,7 @@ def _options():
         env.pop(key, None)
     bundle = getattr(sys, "_MEIPASS", None)
     if bundle:
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
         env["PATH"] = os.pathsep.join(p for p in env.get("PATH", "").split(os.pathsep)
                                       if not Path(p).is_relative_to(bundle))
         if "LD_LIBRARY_PATH_ORIG" in env:
@@ -71,6 +101,11 @@ def _options():
 
 
 def _command(python, arg):
+    if python == BUNDLED_METAL:
+        path = bundled_worker()
+        if path is None:
+            raise FileNotFoundError("未找到内置 Metal 运行时")
+        return [str(path), arg]
     return [python, "-I", "-u", str(Path(__file__).with_name("gpu_worker.py")), arg]
 
 
@@ -78,7 +113,7 @@ def probe(python):
     result = subprocess.run(_command(python, "--probe"), capture_output=True, text=True,
                             errors="replace", timeout=45, **_options())
     if result.returncode or not result.stdout.strip():
-        raise RuntimeError((result.stderr.strip() or "CUDA 探测失败").splitlines()[-1])
+        raise RuntimeError((result.stderr.strip() or "GPU 探测失败").splitlines()[-1])
     return result.stdout.strip()
 
 
@@ -113,11 +148,11 @@ def configure(python):
 def calculate(op, arrays, **args):
     global _process, _directory, failure
     with _lock:
-        if not enabled():
+        if not supports(op):
             return None
         try:
             if _process is None:
-                _directory = tempfile.TemporaryDirectory(prefix="clamptrace_cuda_")
+                _directory = tempfile.TemporaryDirectory(prefix="clamptrace_gpu_")
                 atexit.unregister(close)
                 atexit.register(close)
                 with (Path(_directory.name) / "errors.log").open("wb") as errors:
@@ -130,10 +165,10 @@ def calculate(op, arrays, **args):
             line = _process.stdout.readline()
             if not line:
                 detail = (directory / "errors.log").read_text(errors="replace").strip()
-                raise RuntimeError(f"CUDA 进程已退出：{_process.poll()} {detail[-700:]}")
+                raise RuntimeError(f"GPU 进程已退出：{_process.poll()} {detail[-700:]}")
             reply = json.loads(line)
             if not reply.get("ok"):
-                raise RuntimeError(reply.get("error", "CUDA 计算失败"))
+                raise RuntimeError(reply.get("error", "GPU 计算失败"))
             return np.load(directory / "result.npy", allow_pickle=False)
         except (OSError, RuntimeError, ValueError, EOFError) as exc:
             failure = str(exc)
@@ -144,7 +179,7 @@ def calculate(op, arrays, **args):
 def find_peaks(signal, height, distance, prominence=None):
     from scipy.signal import find_peaks as cpu_peaks, peak_prominences
     peaks = None
-    if enabled() and signal.size >= 250_000 and np.isfinite(height):
+    if supports("peaks") and signal.size >= 250_000 and np.isfinite(height):
         peaks = calculate("peaks", {"x": signal}, height=height)
     if peaks is None:
         return cpu_peaks(signal, height=height, distance=distance, prominence=prominence)[0]

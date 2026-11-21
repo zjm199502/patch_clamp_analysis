@@ -159,7 +159,7 @@ def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_
                  engine_version, tf.__version__]
     graph = gpu.model_graph(key) if gpu.enabled() and not callbacks else None
     if graph:
-        cache_key.append("cuda-torch-1")
+        cache_key.append(gpu.prediction_tag())
     reuse = (previous is not None and previous.window_scores is not None
              and previous.params.get("prediction_key") == cache_key and not callbacks)
     window_scores = None
@@ -210,7 +210,7 @@ def detect_miniml(y: np.ndarray, fs: float, direction: str = "negative", window_
                      method="miniML", trace=np.asarray(det.prediction, float), threshold=threshold,
                      window_scores=window_scores,
                      params=dict(model=model, window_ms=window_ms, threshold=threshold, direction=direction,
-                                 backend="CUDA" if cache_key[-1] == "cuda-torch-1" else "TensorFlow",
+                                 backend=gpu.backend() if cache_key[-1] == gpu.prediction_tag() else "TensorFlow",
                                  batch_size=batch_size, prediction_key=cache_key))
 
 

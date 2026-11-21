@@ -129,6 +129,10 @@ jobs:
             --exclude-module numba --exclude-module llvmlite --exclude-module umap \
             --exclude-module PyQt5 --exclude-module PyQt6 --exclude-module qt_material \
             --exclude-module tkinter packaging/launcher.py
+      - name: Bundle Apple Silicon Metal runtime
+        run: bash packaging/build_metal.sh dist/PatchClampAnalysis.app
+      - name: Validate packaged Metal runtime and miniML results
+        run: python packaging/check_metal.py dist/PatchClampAnalysis.app
       - name: Sign, (optionally) notarize, zip and dmg
         # ad-hoc signature without secrets; Developer ID + notarization once they are added
         env:
@@ -141,6 +145,13 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: bash packaging/macos_sign.sh dist/PatchClampAnalysis.app PatchClampAnalysis-macOS-arm64
+      - name: Launch signed arm64 app
+        run: |
+          QT_QPA_PLATFORM=offscreen ./dist/PatchClampAnalysis.app/Contents/MacOS/PatchClampAnalysis & pid=$!
+          sleep 20
+          kill -0 "$pid"
+          kill "$pid"
+          codesign --verify --deep --strict dist/PatchClampAnalysis.app
       - uses: actions/upload-artifact@v4
         with:
           name: macos

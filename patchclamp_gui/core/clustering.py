@@ -50,7 +50,7 @@ def _matrix(df: pd.DataFrame, waves: np.ndarray, representation: str, features: 
     if representation == "waveform":
         pk = np.nanmax(waves, axis=1, keepdims=True)
         valid = np.isfinite(waves).all(axis=1) & (pk[:, 0] > 0)
-        if gpu.enabled() and waves.size >= 100_000 and valid.sum() >= 30:
+        if gpu.supports("waveform") and waves.size >= 100_000 and valid.sum() >= 30:
             components = min(n_components, int(valid.sum()) - 1, waves.shape[1])
             scores = gpu.calculate("waveform", {"x": waves[valid].astype(float, copy=False)},
                                    width=max(waves.shape[1] // 100, 1), components=components)

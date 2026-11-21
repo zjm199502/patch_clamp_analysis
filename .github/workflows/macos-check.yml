@@ -24,13 +24,18 @@ jobs:
         run: |
           pyinstaller --noconfirm --clean --windowed --name PatchClampAnalysis \
             --osx-bundle-identifier org.patchclamp.analysis \
-            --add-data "base_version.txt:." \
+            --icon packaging/clamptrace.icns --collect-data patchclamp_gui \
+            --add-data "patchclamp_gui/core/gpu_worker.py:patchclamp_gui/core" --add-data "base_version.txt:." \
             --collect-submodules patchclamp_gui \
             --collect-submodules pyqtgraph --collect-data pyqtgraph \
             --collect-submodules miniml --collect-data miniml \
             --exclude-module numba --exclude-module llvmlite --exclude-module umap \
             --exclude-module PyQt5 --exclude-module PyQt6 --exclude-module qt_material \
             --exclude-module tkinter packaging/launcher.py
+      - name: Bundle Apple Silicon Metal runtime
+        run: bash packaging/build_metal.sh dist/PatchClampAnalysis.app
+      - name: Validate packaged Metal runtime and miniML results
+        run: python packaging/check_metal.py dist/PatchClampAnalysis.app
       - name: Sign, (optionally) notarize, zip and dmg
         env:
           MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}

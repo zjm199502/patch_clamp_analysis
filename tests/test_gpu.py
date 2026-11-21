@@ -9,9 +9,9 @@ from patchclamp_gui.core import gpu
 
 @pytest.fixture
 def runtime():
-    path = os.environ.get("CLAMPTRACE_TEST_CUDA_PYTHON")
+    path = os.environ.get("CLAMPTRACE_TEST_GPU_PYTHON") or os.environ.get("CLAMPTRACE_TEST_CUDA_PYTHON")
     if not path:
-        pytest.skip("external CUDA environment not configured")
+        pytest.skip("GPU environment not configured")
     gpu.configure(path)
     yield
     error = gpu.failure
@@ -22,13 +22,15 @@ def runtime():
 def test_unavailable_worker_falls_back(tmp_path):
     gpu.configure(str(tmp_path / "missing-python"))
     try:
-        assert gpu.calculate("smooth", {"x": np.ones(16)}) is None
+        assert gpu.calculate("predict", {"x": np.ones(16)}) is None
         assert gpu.failure and not gpu.enabled()
     finally:
         gpu.configure("")
 
 
 def test_signal_and_pca_cuda(runtime):
+    if gpu.backend() != "CUDA":
+        pytest.skip("float64 signal kernels require CUDA")
     from patchclamp_gui.core import deconv, preprocess, clustering
     from unittest.mock import patch
     rng = np.random.default_rng(7)
@@ -54,7 +56,7 @@ def test_signal_and_pca_cuda(runtime):
 
 
 @pytest.mark.parametrize("direction", ["negative", "positive"])
-def test_cuda_miniml(runtime, direction):
+def test_gpu_miniml(runtime, direction):
     from unittest.mock import patch
     from patchclamp_gui import io
     from patchclamp_gui.core.session import CellSession
@@ -67,7 +69,7 @@ def test_cuda_miniml(runtime, direction):
     with patch.object(gpu, "enabled", return_value=False):
         cpu = detect()
     cuda = detect()
-    assert cuda.det.params["backend"] == "CUDA"
+    assert cuda.det.params["backend"] == gpu.backend()
     np.testing.assert_allclose(cuda.det.trace, cpu.det.trace, atol=3e-5)
     np.testing.assert_array_equal(cuda.det.onsets, cpu.det.onsets)
     np.testing.assert_array_equal(cuda.events.peak_idx, cpu.events.peak_idx)
@@ -100,3 +102,24 @@ def test_mid_record_failure_restarts_on_cpu(monkeypatch):
     assert reports[-1][0] == reports[-1][1]
     np.testing.assert_allclose(result.window_scores, expected.window_scores, atol=1e-6)
     np.testing.assert_array_equal(result.onsets, expected.onsets)
+
+
+def test_metal_routing_and_runtime_selection(monkeypatch, tmp_path):
+    import sys
+    from unittest.mock import patch
+
+    exe = tmp_path / "ClampTrace.app/Contents/MacOS/PatchClampAnalysis"
+    helper = exe.parent.parent / "Resources/ClampTraceMetal/ClampTraceMetal"
+    helper.parent.mkdir(parents=True)
+    helper.touch()
+    with (patch.object(sys, "platform", "darwin"),
+          patch.object(sys, "frozen", True, create=True),
+          patch.object(sys, "executable", str(exe)),
+          patch.object(gpu.platform, "machine", return_value="arm64")):
+        assert gpu.default_runtime() == gpu.BUNDLED_METAL
+        assert gpu._command(gpu.BUNDLED_METAL, "--probe") == [str(helper), "--probe"]
+        monkeypatch.setattr(gpu, "enabled", lambda: True)
+        assert gpu.prediction_tag() == "mps-torch-1" and gpu.supports("predict")
+        assert not gpu.supports("baseline")
+        assert gpu.calculate("wiener", {"x": np.ones(10)}) is None
+        assert not gpu.failure

@@ -171,7 +171,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.deconv_res = None
         self.last_error = None
         self.settings = QtCore.QSettings("PatchClampAnalysis", "PatchClampAnalysis")
-        gpu.configure(self.settings.value("analysis/gpuPython", "", type=str))
+        gpu.configure(self.settings.value("analysis/gpuPython", gpu.default_runtime(), type=str))
         self._build_menu()
         self._build_ui()
         self.set_ui_points(int(self.settings.value("ui/points", 10)))
@@ -1219,13 +1219,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.workers:
             self.statusBar().showMessage("请在当前任务完成后切换计算设备。")
             return
-        current = self.settings.value("analysis/gpuPython", "", type=str)
-        options = ["使用 CPU", *dict.fromkeys(filter(None, [current, *gpu.candidates()])), "浏览 Python 可执行文件…"]
+        current = self.settings.value("analysis/gpuPython", gpu.default_runtime(), type=str)
+        paths = list(dict.fromkeys(filter(None, [gpu.default_runtime(), current, *gpu.candidates()])))
+        options = ["使用 CPU", *["内置 Apple GPU（Metal）" if p == gpu.BUNDLED_METAL else p for p in paths],
+                   "浏览 Python 可执行文件…"]
         selected, ok = QtWidgets.QInputDialog.getItem(
-            self, "GPU 加速", "选择安装了 CUDA 版 PyTorch、NumPy 和 h5py 的 Python 环境",
-            options, options.index(current) if current else 0, False)
+            self, "GPU 加速", "选择设备，或选择装有 GPU 版 PyTorch、NumPy 和 h5py 的 Python 环境",
+            options, paths.index(current) + 1 if current else 0, False)
         if not ok:
             return
+        if selected in options[1:-1]:
+            selected = paths[options.index(selected) - 1]
         if selected == options[-1]:
             selected, _ = QtWidgets.QFileDialog.getOpenFileName(self, "选择 GPU 环境中的 Python")
             if not selected:

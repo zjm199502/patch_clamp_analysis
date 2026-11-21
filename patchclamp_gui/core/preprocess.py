@@ -40,7 +40,7 @@ def rolling_baseline(y: np.ndarray, fs: float, win_s: float = 1.0) -> np.ndarray
     nseg = max(len(y) // w, 1)
     edges = np.linspace(0, len(y), nseg + 1).astype(int)
     med = None
-    if gpu.enabled() and len(y) >= 500_000:
+    if gpu.supports("baseline") and len(y) >= 500_000:
         med = gpu.calculate("baseline", {"x": y}, segments=nseg)
     if med is None:
         med = np.array([np.median(y[a:b]) for a, b in zip(edges[:-1], edges[1:])])

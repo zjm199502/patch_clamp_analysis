@@ -45,7 +45,7 @@ def deconvolve(y: np.ndarray, fs: float, tau_rise_ms: float = 0.5, tau_decay_ms:
     if kernel is None:
         kernel = biexp_kernel(fs, tau_rise_ms, tau_decay_ms)
     sigma = smooth_ms / 1e3
-    use_gpu = gpu.enabled() and n >= 250_000
+    use_gpu = gpu.supports("wiener") and n >= 250_000
     d = K = None
     if use_gpu:
         d = gpu.calculate("wiener", {"x": s, "kernel": kernel}, nfft=nfft, reg=reg, fs=fs, sigma=sigma)

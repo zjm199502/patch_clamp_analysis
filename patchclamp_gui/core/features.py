@@ -62,7 +62,7 @@ def extract_events(y: np.ndarray, fs: float, onsets: np.ndarray, direction: str 
         w = np.hanning(k + 2)[1:-1]
         weights = w / w.sum()
         ys = None
-        if gpu.enabled() and n >= 500_000 and k >= 9:
+        if gpu.supports("smooth") and n >= 500_000 and k >= 9:
             ys = gpu.calculate("smooth", {"x": s, "kernel": weights})
         if ys is None:
             ys = np.convolve(s, weights, mode="same")
