@@ -128,9 +128,7 @@ def test_channel_patch_and_full(monkeypatch, tmp_path):
            "patch": {"url": "https://x/p.zip", "size": 5},
            "full_version": "99.0.1", "full": {"PatchClampAnalysis-Windows.zip": {"url": "https://x/w.zip", "size": 9}}}
 
-    def fake_open(req, timeout=None, context=None):
-        return _Resp(json.dumps(man).encode())
-    monkeypatch.setattr(updater.urllib.request, "urlopen", fake_open)
+    monkeypatch.setattr(updater, "_get_json", lambda url, timeout: man)
     monkeypatch.setattr(updater, "asset_name", lambda: "PatchClampAnalysis-Windows.zip")
     # base new enough -> small update
     monkeypatch.setattr(patching, "base_version", lambda: "99.0.1")
