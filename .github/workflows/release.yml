@@ -205,7 +205,7 @@ jobs:
           if [ "$FULL" = "true" ]; then upload="$upload assets/PatchClampAnalysis-Windows.zip assets/PatchClampAnalysis-macOS-arm64.zip"; fi
           gh release upload updates $upload --clobber
           python3 - <<'PY'
-          import json, os, subprocess
+          import hashlib, json, os
           repo = os.environ["GITHUB_REPOSITORY"]; v = os.environ["VERSION"]
           base = f"https://github.com/{repo}/releases/download/updates/"
           old = json.load(open("old.json"))
@@ -214,6 +214,8 @@ jobs:
                "min_base": os.environ["MIN_BASE"],
                "page": f"https://github.com/{repo}/releases/latest",
                "patch": {"url": base + os.environ["PATCH_FILE"], "size": size(os.environ["PATCH_FILE"])}}
+          with open(os.environ["PATCH_FILE"], "rb") as f:
+              m["patch"]["sha256"] = hashlib.file_digest(f, "sha256").hexdigest()
           if os.environ["FULL"] == "true":
               m["full_version"] = v
               m["full"] = {n: {"url": base + n, "size": size("assets/" + n)}

@@ -67,9 +67,58 @@ def test_check_latest_and_prepare(monkeypatch, tmp_path):
 
 def test_no_update_when_same(monkeypatch):
     def fake_open(req, timeout=None, context=None):
-        return _Resp(json.dumps({"tag_name": "v" + updater.__version__, "assets": []}).encode())
+        return _Resp(json.dumps({"version": updater.__version__}).encode())
     monkeypatch.setattr(updater.urllib.request, "urlopen", fake_open)
     assert updater.check_latest() is None
+
+
+def test_channel_api_after_timeout(monkeypatch):
+    seen = []
+
+    def get(url, timeout, accept=None):
+        seen.append(url)
+        if url == updater.CHANNEL_MANIFEST:
+            raise TimeoutError()
+        if "/tags/updates?" in url:
+            return {"assets": [{"name": "latest.json", "id": 123}]}
+        assert url.startswith(updater.API_ROOT + "/assets/123?")
+        assert accept == "application/octet-stream"
+        return {"version": "99.3.0"}
+
+    monkeypatch.setattr(updater, "_get_json", get)
+    assert updater.check_latest().version == "99.3.0"
+    assert updater.API_LATEST not in seen
+
+
+@pytest.mark.parametrize("major_reachable", [False, True])
+def test_unreachable_channel_does_not_report_up_to_date(monkeypatch, major_reachable):
+    def get(url, timeout):
+        if major_reachable and url == updater.API_LATEST:
+            return {"tag_name": "v0.3.0"}
+        raise TimeoutError()
+
+    monkeypatch.setattr(updater, "_get_json", get)
+    with pytest.raises(ConnectionError, match="GitHub API：连接超时"):
+        updater.check_latest()
+
+
+def test_cut_off_download_restarts_and_checks_hash(monkeypatch, tmp_path):
+    import hashlib
+    payload = b"complete"
+    monkeypatch.setattr(updater, "_api_asset", lambda name, timeout: "https://api.github.com/asset")
+    monkeypatch.setattr(updater, "_ssl_context", lambda: None)
+
+    def get(req, **kw):
+        return _Resp(payload if req.get_header("Accept") == "application/octet-stream" else b"cut")
+
+    monkeypatch.setattr(updater.urllib.request, "urlopen", get)
+    url = updater.CHANNEL_ROOT + "patch.zip"
+    dest = tmp_path / "patch.zip"
+    assert updater.download(url, dest, size=len(payload), sha256=hashlib.sha256(payload).hexdigest()).read_bytes() == payload
+    with pytest.raises(ConnectionError, match="SHA-256"):
+        updater.download(url, dest, size=len(payload), sha256="0" * 64)
+    with pytest.raises(InterruptedError):
+        updater.download(url, dest, should_stop=lambda: True)
 
 
 def test_channel_patch_and_full(monkeypatch, tmp_path):

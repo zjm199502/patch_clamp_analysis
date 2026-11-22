@@ -77,7 +77,7 @@ class UpdateManager(QObject):
             self.settings.setValue("update/last_check", time.time())
         if err is not None:
             if manual:
-                QMessageBox.warning(self.win, "检查更新", f"无法连接更新服务器：\n{err}")
+                QMessageBox.warning(self.win, "检查更新", f"{err}\n\n请检查网络或系统代理，或换一个网络再试。")
             return
         if rel is None:
             if manual:

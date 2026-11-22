@@ -19,15 +19,20 @@ process to exit, swaps the folders and starts the new version.
 
 from __future__ import annotations
 
+import hashlib
+import http.client
 import json
 import os
 import platform
 import re
 import shutil
 import ssl
+import socket
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -38,7 +43,9 @@ from . import __version__
 
 REPO = "zjm199502/patch_clamp_analysis"
 API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
-CHANNEL_MANIFEST = f"https://github.com/{REPO}/releases/download/updates/latest.json"
+CHANNEL_ROOT = f"https://github.com/{REPO}/releases/download/updates/"
+CHANNEL_MANIFEST = CHANNEL_ROOT + "latest.json"
+API_ROOT = f"https://api.github.com/repos/{REPO}/releases"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 UA = {"User-Agent": "PatchClampAnalysis-updater", "Accept": "application/vnd.github+json"}
 
@@ -52,6 +59,7 @@ class Release:
     asset_size: int = 0
     kind: str = "full"       # "patch" (small, in place), "full" (whole app) or "page" (manual)
     min_base: str = "0"
+    sha256: str = ""
 
 
 def parse_version(v: str) -> tuple[int, ...]:
@@ -64,11 +72,13 @@ def is_newer(remote: str, local: str = __version__) -> bool:
 
 
 def _ssl_context():
+    context = ssl.create_default_context()
     try:
         import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        return ssl.create_default_context()
+        context.load_verify_locations(cafile=certifi.where())
+    except (ImportError, OSError):
+        pass
+    return context
 
 
 def asset_name() -> str | None:
@@ -96,21 +106,64 @@ def install_root() -> Path | None:
     return exe.parent
 
 
-def _get_json(url: str, timeout: float):
-    req = urllib.request.Request(url, headers=UA)
+def _get_json(url: str, timeout: float, accept: str = UA["Accept"]):
+    req = urllib.request.Request(url, headers={**UA, "Accept": accept})
     with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as r:
         return json.load(r)
+
+
+def _api_asset(name: str, timeout: float) -> str:
+    tag = _get_json(f"{API_ROOT}/tags/updates?t={int(time.time())}", timeout)
+    for asset in tag["assets"]:
+        if asset["name"] == name and isinstance(asset["id"], int):
+            # Release downloads redirect to expiring URLs. Get a fresh redirect.
+            return f"{API_ROOT}/assets/{asset['id']}?t={int(time.time())}"
+    raise ValueError(f"软件内更新通道缺少 {name}")
+
+
+def _reason(error: Exception) -> str:
+    if isinstance(error, urllib.error.HTTPError):
+        return f"HTTP {error.code} {error.reason}"
+    cause = getattr(error, "reason", error)
+    if isinstance(cause, TimeoutError):
+        return "连接超时"
+    if isinstance(cause, ssl.SSLError):
+        return f"TLS 连接或证书校验失败（{cause}）"
+    if isinstance(cause, socket.gaierror):
+        return "域名解析失败"
+    return str(cause)
+
+
+def _read_channel(timeout):
+    failures = []
+    for use_api, route in ((False, "GitHub 下载地址"), (True, "GitHub API")):
+        try:
+            if use_api:
+                url = _api_asset("latest.json", timeout)
+                manifest = _get_json(url, timeout, "application/octet-stream")
+            else:
+                manifest = _get_json(CHANNEL_MANIFEST, timeout)
+            if not isinstance(manifest, dict) or not re.fullmatch(r"v?\d+\.\d+\.\d+", str(manifest.get("version", ""))):
+                raise ValueError("返回的内容不是有效的更新清单")
+            return manifest
+        except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException) as exc:
+            failures.append(f"{route}：{_reason(exc)}")
+    raise ConnectionError("无法读取软件内补丁清单。\n" + "\n".join(failures))
 
 
 def check_latest(timeout: float = 8.0) -> Release | None:
     """Newest available version, or None when the running one is up to date."""
     from . import patching
     try:
-        m = _get_json(CHANNEL_MANIFEST, timeout)
-    except Exception:
-        m = None
-    if m is None:          # no channel yet: fall back to the newest GitHub Release
-        data = _get_json(API_LATEST, timeout)
+        m = _read_channel(timeout)
+    except ConnectionError as channel_error:
+        try:
+            data = _get_json(API_LATEST, timeout)
+        except (OSError, ValueError, http.client.HTTPException):
+            raise channel_error from None
+        if not is_newer(str(data.get("tag_name", ""))):
+            # A major-only release cannot tell us whether a newer patch exists.
+            raise channel_error
         want = asset_name()
         full = {a["name"]: (a["browser_download_url"], int(a.get("size", 0)))
                 for a in data.get("assets", [])}
@@ -126,7 +179,8 @@ def check_latest(timeout: float = 8.0) -> Release | None:
     min_base = str(m.get("min_base", ver))
     patch = m.get("patch") or {}
     if base and patch.get("url") and patching.parse_version(base) >= patching.parse_version(min_base):
-        return Release(ver, notes, page, patch["url"], int(patch.get("size", 0)), "patch", min_base)
+        return Release(ver, notes, page, patch["url"], int(patch.get("size", 0)), "patch", min_base,
+                       patch.get("sha256", ""))
     full = (m.get("full") or {}).get(asset_name() or "", {})
     root = install_root()
     if sys.platform == "win32" and root and (any(root.glob("unins*.exe")) or
@@ -138,10 +192,34 @@ def check_latest(timeout: float = 8.0) -> Release | None:
 
 
 def download(url: str, dest: Path, progress: Callable[[float], None] | None = None,
-             should_stop: Callable[[], bool] | None = None) -> Path:
-    req = urllib.request.Request(url, headers={"User-Agent": UA["User-Agent"]})
+             should_stop: Callable[[], bool] | None = None, *, size=0, sha256="") -> Path:
+    def fetch(address, accept):
+        return _download_once(address, dest, progress, should_stop, size, sha256, accept)
+
+    try:
+        return fetch(url, "*/*")
+    except InterruptedError:
+        raise
+    except (urllib.error.URLError, ConnectionError, TimeoutError, http.client.HTTPException, ValueError) as first:
+        if not url.startswith(CHANNEL_ROOT):
+            raise
+        if should_stop and should_stop():
+            raise InterruptedError("已取消") from None
+        if progress:
+            progress(0)
+        try:
+            return fetch(_api_asset(url[len(CHANNEL_ROOT):], 10), "application/octet-stream")
+        except InterruptedError:
+            raise
+        except (OSError, ValueError, KeyError, http.client.HTTPException) as second:
+            raise ConnectionError(f"补丁下载失败。\nGitHub 下载地址：{_reason(first)}\nGitHub API：{_reason(second)}") from second
+
+
+def _download_once(url, dest, progress, should_stop, size, sha256, accept):
+    req = urllib.request.Request(url, headers={"User-Agent": UA["User-Agent"], "Accept": accept})
     with urllib.request.urlopen(req, timeout=30, context=_ssl_context()) as r, open(dest, "wb") as f:
-        total = int(r.headers.get("Content-Length") or 0)
+        total = size or int(r.headers.get("Content-Length") or 0)
+        digest = hashlib.sha256() if sha256 else None
         done = 0
         while True:
             if should_stop and should_stop():
@@ -150,9 +228,15 @@ def download(url: str, dest: Path, progress: Callable[[float], None] | None = No
             if not chunk:
                 break
             f.write(chunk)
+            if digest:
+                digest.update(chunk)
             done += len(chunk)
             if progress and total:
                 progress(done / total)
+        if total and total != done:
+            raise ValueError(f"下载不完整（{done}/{total} 字节）")
+        if digest and digest.hexdigest() != sha256:
+            raise ValueError("下载文件的 SHA-256 校验失败")
     return dest
 
 
@@ -162,7 +246,8 @@ def prepare_patch(rel: Release, progress=None, should_stop=None) -> Path:
     work = Path(tempfile.mkdtemp(prefix="patchclamp_patch_"))
     try:
         zpath = download(rel.asset_url, work / "patch.zip",
-                         (lambda f: progress(0.9 * f)) if progress else None, should_stop)
+                         (lambda f: progress(0.9 * f)) if progress else None, should_stop,
+                         size=rel.asset_size, sha256=rel.sha256)
         out = work / "pkg"
         with zipfile.ZipFile(zpath) as z:
             z.extractall(out)
