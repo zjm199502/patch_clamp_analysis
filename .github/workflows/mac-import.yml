@@ -1,0 +1,21 @@
+name: Diagnose published Mac import
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  import:
+    runs-on: macos-15
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: python -m pip install pyabf h5py
+      - name: Import into published Apple Silicon app
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sysctl -n machdep.cpu.brand_string
+          gh release download updates -p PatchClampAnalysis-macOS-arm64.zip -p patchclamp_gui-patch-0.3.3.zip
+          ditto -x -k PatchClampAnalysis-macOS-arm64.zip "$RUNNER_TEMP/old"
+          python packaging/check_mac_import.py "$RUNNER_TEMP/old/PatchClampAnalysis.app" --patch patchclamp_gui-patch-0.3.3.zip
