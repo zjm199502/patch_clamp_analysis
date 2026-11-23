@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - "packaging/**"
+      - "patchclamp_gui/**"
       - ".github/workflows/release.yml"
       - ".github/workflows/macos-check.yml"
       - "pyproject.toml"
@@ -36,6 +37,8 @@ jobs:
         run: bash packaging/build_metal.sh dist/PatchClampAnalysis.app
       - name: Validate packaged Metal runtime and miniML results
         run: python packaging/check_metal.py dist/PatchClampAnalysis.app
+      - name: Exercise Cocoa imports and default Worker deconvolution
+        run: python packaging/check_mac_import.py dist/PatchClampAnalysis.app
       - name: Sign, (optionally) notarize, zip and dmg
         env:
           MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}

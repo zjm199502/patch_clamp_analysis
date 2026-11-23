@@ -5,6 +5,7 @@ import os
 import csv
 import gc
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -55,6 +56,10 @@ class Worker(QtCore.QThread):
 
     def __init__(self, fn, parent=None, tracked=False):
         super().__init__(parent)
+        if sys.platform == "darwin":
+            # Qt's default macOS stack can be too small for native numerical
+            # libraries. Reserve headroom before starting the thread.
+            self.setStackSize(8 * 1024 * 1024)
         self.fn = fn
         self.tracked = tracked
 
@@ -1326,7 +1331,10 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.batch_condition.notify_all()
                     raise
 
-            with threadpool_limits(limits=1 if lanes > 1 else limit), ThreadPoolExecutor(max_workers=lanes) as pool:
+            threads = 1 if lanes > 1 else limit
+            # Preserve the macOS startup cap when the batch has only one lane.
+            limits = {"blas": threads, "openmp": threads, "openblas": 1} if sys.platform == "darwin" else threads
+            with threadpool_limits(limits=limits), ThreadPoolExecutor(max_workers=lanes) as pool:
                 futures = [pool.submit(process_lane) for _ in range(lanes)]
                 for future in futures:
                     future.result()

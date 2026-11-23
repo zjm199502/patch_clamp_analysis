@@ -9,6 +9,24 @@ from patchclamp_gui import gui  # noqa: F401  (选择 PySide6)
 QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 
 
+@pytest.mark.parametrize("platform, openblas", [("darwin", "1"), ("win32", "8"), ("linux", "8")])
+def test_analysis_thread_policy(monkeypatch, platform, openblas):
+    from types import SimpleNamespace
+
+    from patchclamp_gui.gui import app, main_window
+
+    monkeypatch.setattr(app, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(main_window, "sys", SimpleNamespace(platform=platform))
+    names = ("OPENBLAS_NUM_THREADS", "OPENBLAS_DEFAULT_NUM_THREADS", "MKL_NUM_THREADS",
+             "OMP_NUM_THREADS", "TF_NUM_INTRAOP_THREADS", "TF_NUM_INTEROP_THREADS")
+    for key in names:
+        monkeypatch.setenv(key, "23")
+
+    app._configure_cpu_threads(8)
+    assert [os.environ[key] for key in names] == [openblas, "1" if platform == "darwin" else "23", "8", "8", "8", "1"]
+    assert main_window.Worker(lambda: None).stackSize() == (8 * 1024 * 1024 if platform == "darwin" else 0)
+
+
 def test_gui_full_workflow(monkeypatch, tmp_path):
     import pyqtgraph as pg
 

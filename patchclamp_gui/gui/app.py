@@ -7,13 +7,22 @@ from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication
 
 
+def _configure_cpu_threads(limit):
+    for variable in ("MKL_NUM_THREADS", "OMP_NUM_THREADS", "TF_NUM_INTRAOP_THREADS"):
+        os.environ[variable] = str(limit)
+    # The macOS build's OpenBLAS parallel LU path can exhaust a worker's
+    # native stack, even during the small linear solve for a filter's state.
+    os.environ["OPENBLAS_NUM_THREADS"] = "1" if sys.platform == "darwin" else str(limit)
+    if sys.platform == "darwin":
+        os.environ["OPENBLAS_DEFAULT_NUM_THREADS"] = "1"
+    os.environ["TF_NUM_INTEROP_THREADS"] = "1"
+
+
 def main():
     from PySide6.QtCore import QSettings
     from ..core.cpu_budget import available, budget
     limit = budget(QSettings("PatchClampAnalysis", "PatchClampAnalysis").value("analysis/cpus", 0), available())
-    for variable in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS", "TF_NUM_INTRAOP_THREADS"):
-        os.environ[variable] = str(limit)
-    os.environ["TF_NUM_INTEROP_THREADS"] = "1"
+    _configure_cpu_threads(limit)  # pyqtgraph imports NumPy; configure OpenBLAS first
     import pyqtgraph as pg
 
     pg.setConfigOptions(antialias=False, background="w", foreground="k")
