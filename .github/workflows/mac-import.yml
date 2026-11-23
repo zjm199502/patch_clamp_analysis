@@ -1,5 +1,11 @@
-name: Diagnose published Mac import
-on: workflow_dispatch
+name: Check published Mac with candidate patch
+on:
+  pull_request:
+    paths:
+      - "patchclamp_gui/**"
+      - "packaging/**"
+      - ".github/workflows/mac-import.yml"
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -11,11 +17,11 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.11'}
       - run: python -m pip install pyabf h5py
-      - name: Import into published Apple Silicon app
+      - name: Run Cocoa import and Worker deconvolution on published Apple Silicon app
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           sysctl -n machdep.cpu.brand_string
-          gh release download updates -p PatchClampAnalysis-macOS-arm64.zip -p patchclamp_gui-patch-0.3.3.zip
+          gh release download updates -p PatchClampAnalysis-macOS-arm64.zip
           ditto -x -k PatchClampAnalysis-macOS-arm64.zip "$RUNNER_TEMP/old"
-          python packaging/check_mac_import.py "$RUNNER_TEMP/old/PatchClampAnalysis.app" --patch patchclamp_gui-patch-0.3.3.zip
+          python packaging/check_mac_import.py "$RUNNER_TEMP/old/PatchClampAnalysis.app"
